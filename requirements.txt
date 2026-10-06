@@ -1,0 +1,9 @@
+fastapi
+uvicorn[standard]
+pdfplumber
+google-genai
+python-dotenv
+
+# 테스트
+pytest
+httpx
