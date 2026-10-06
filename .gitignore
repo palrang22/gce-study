@@ -1,0 +1,54 @@
+# ===== 프로젝트 문서 / 원본 자료 =====
+CLAUDE.md
+guide.md
+plan.md
+questions/
+
+# ===== 데이터 (회사 자료, 개인 풀이 기록) =====
+data/raw/
+data/sample.txt
+data/questions.json
+data/*.db
+data/*.db-journal
+data/*.db-wal
+data/*.db-shm
+
+# ===== 환경변수 / 인증 =====
+.env
+.env.*
+!.env.example
+*.pem
+*-credentials.json
+service-account*.json
+
+# ===== Python =====
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+env/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# ===== Web 프론트 =====
+node_modules/
+dist/
+build/
+.cache/
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# ===== OS / 에디터 =====
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+*~
