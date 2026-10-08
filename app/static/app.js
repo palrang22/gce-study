@@ -601,7 +601,7 @@ async function renderQuiz(sessionId) {
         ${err}
         ${ai.messages.length ? `<div class="ai-messages">${ai.messages.map(aiMessageHtml).join("")}</div>` : ""}
         <form class="ai-ask" id="ai-ask-form">
-          <input type="text" id="ai-ask-input" placeholder="이어서 질문하기" maxlength="2000" ${ai.msgLoading ? "disabled" : ""}>
+          <textarea id="ai-ask-input" rows="1" placeholder="이어서 질문하기 (Shift+Enter 줄바꿈)" maxlength="2000" ${ai.msgLoading ? "disabled" : ""}></textarea>
           <button type="submit" ${ai.msgLoading ? "disabled" : ""}>${ai.msgLoading ? "답변 중…" : "질문"}</button>
         </form>
         ${msgErr}
@@ -613,6 +613,19 @@ async function renderQuiz(sessionId) {
   });
   $("#ai-area").addEventListener("submit", (e) => {
     if (e.target.id === "ai-ask-form") { e.preventDefault(); askAi(); }
+  });
+  // textarea라 Enter로 보내려면 직접 가로채야 함 (Shift+Enter는 줄바꿈으로 둠)
+  $("#ai-area").addEventListener("keydown", (e) => {
+    if (e.target.id === "ai-ask-input" && e.key === "Enter" && !e.shiftKey) {
+      e.preventDefault();
+      askAi();
+    }
+  });
+  $("#ai-area").addEventListener("input", (e) => {
+    if (e.target.id === "ai-ask-input") {
+      e.target.style.height = "auto";
+      e.target.style.height = `${e.target.scrollHeight}px`;
+    }
   });
   async function loadAiMessages() {
     try {
