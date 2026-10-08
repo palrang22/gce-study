@@ -76,6 +76,7 @@ main {
   text-decoration: none;
 }
 .topbar nav a.active { background: var(--surface-2); color: var(--text); font-weight: 600; }
+#exam-switch { padding: 6px 12px; font-size: .9rem; }
 
 /* ---------- 공통 ---------- */
 h1 { font-size: 1.4rem; margin: 0 0 4px; }

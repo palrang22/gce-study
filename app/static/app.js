@@ -129,7 +129,7 @@ let cleanup = null;        // 화면별 전역 이벤트 해제
 function route() {
   if (cleanup) { cleanup(); cleanup = null; }
   const hash = location.hash || "#/";
-  const quiz = hash.match(/^#\/quiz(?:\/(\d+))?/);
+  const quiz = hash.match(/^#\/quiz(?:\/(\d+|notes))?/);
   const name = hash.startsWith("#/exam") ? "exam"
     : quiz ? "quiz"
     : hash.startsWith("#/wrong-notes") ? "wrong-notes"
@@ -142,11 +142,12 @@ function route() {
 
   $$(".topbar nav a").forEach((a) => a.classList.toggle("active", a.dataset.route === name));
   $("#main-nav").hidden = name === "exam";
+  $("#exam-switch").hidden = name === "exam";
   $("#brand").textContent = getExam() ? `GCP Quiz · ${getExam()}` : "GCP Quiz";
 
   const render =
     name === "exam" ? renderExamPicker
-    : name === "quiz" ? () => renderQuiz(quiz[1] ? Number(quiz[1]) : null)
+    : name === "quiz" ? () => renderQuiz(quiz[1] === "notes" ? "notes" : (quiz[1] ? Number(quiz[1]) : null))
     : name === "wrong-notes" ? renderWrongNotes
     : renderHome;
   render().catch((e) => {
@@ -200,6 +201,19 @@ async function startSession(ids, label, params = {}, startIndex = 0) {
     }
     openSession(s.id);
   } catch (e) { toast(e.message); }
+}
+
+// ---------- 로컬 세션 (오답노트 연습: 서버에 세션을 안 만들고 브라우저에만 보관) ----------
+
+const localSessionKey = () => `quiz.localSession.${getExam()}`;
+const loadLocalSession = () => loadJSON(localSessionKey());
+const saveLocalSession = (s) => saveJSON(localSessionKey(), s);
+
+function startLocalSession(ids, numbers, label, startIndex = 0) {
+  if (!ids.length) { toast("풀 문제가 없어요"); return; }
+  saveLocalSession({ label, question_ids: ids, numbers, current_index: startIndex, results: {} });
+  if (location.hash === "#/quiz/notes") route();
+  else location.hash = "#/quiz/notes";
 }
 
 // ---------- 범위 선택 ----------
@@ -362,29 +376,40 @@ async function renderHome() {
 
 async function renderQuiz(sessionId) {
   const rid = ++renderId;
-  if (sessionId == null) {
-    // #/quiz 만 열면 가장 최근 테스트로
-    const sessions = await api("/api/sessions", { params: { exam: getExam() } });
-    if (rid !== renderId) return;
-    if (!sessions.length) {
-      app.innerHTML = `<div class="card"><p>저장된 테스트가 없어요.</p><a href="#/">새 테스트 시작하기</a></div>`;
+  const isLocal = sessionId === "notes";  // 오답노트 연습: 서버 세션 없이 브라우저에만 보관 (localSessionKey)
+  let session;
+  if (isLocal) {
+    session = loadLocalSession();
+    if (!session) {
+      app.innerHTML = `<div class="card"><p>오답노트 연습 정보를 찾을 수 없어요.</p><a href="#/wrong-notes">오답노트로 가기</a></div>`;
       return;
     }
-    history.replaceState(null, "", `#/quiz/${sessions[0].id}`);
-    sessionId = sessions[0].id;
+  } else {
+    if (sessionId == null) {
+      // #/quiz 만 열면 가장 최근 테스트로
+      const sessions = await api("/api/sessions", { params: { exam: getExam() } });
+      if (rid !== renderId) return;
+      if (!sessions.length) {
+        app.innerHTML = `<div class="card"><p>저장된 테스트가 없어요.</p><a href="#/">새 테스트 시작하기</a></div>`;
+        return;
+      }
+      history.replaceState(null, "", `#/quiz/${sessions[0].id}`);
+      sessionId = sessions[0].id;
+    }
+    app.innerHTML = `<p class="muted">불러오는 중…</p>`;
+    session = await api(`/api/sessions/${sessionId}`);
+    if (rid !== renderId) return;
+    if (session.current_index >= session.total) return renderFinished(session);
   }
 
-  app.innerHTML = `<p class="muted">불러오는 중…</p>`;
-  const session = await api(`/api/sessions/${sessionId}`);
-  if (rid !== renderId) return;
-  if (session.current_index >= session.total) return renderFinished(session);
-
+  const total = session.question_ids.length;
   const qid = session.question_ids[session.current_index];
+  if (isLocal) app.innerHTML = `<p class="muted">불러오는 중…</p>`;
   const q = await api(`/api/questions/${qid}`);
   if (rid !== renderId) return;
 
   const letters = Object.keys(q.options);
-  const total = session.total;
+  const isLast = session.current_index + 1 === total;  // 오답노트 연습(local)은 마지막 문제에서 "다음" 비활성화, 결과 화면 없음
   let result = session.results[qid] || null;  // 이 테스트에서 이미 제출했으면 결과 유지
   let selected = new Set(result?.selected || []);
   let inNotes = q.in_wrong_notes;
@@ -440,7 +465,7 @@ async function renderQuiz(sessionId) {
     </article>
     <nav class="pager">
       <button id="prev" ${session.current_index === 0 ? "disabled" : ""}>← 이전</button>
-      <button id="next">${session.current_index + 1 === total ? "결과 보기" : "다음"} →</button>
+      <button id="next" ${isLast && isLocal ? "disabled" : ""}>${isLast ? (isLocal ? "다음" : "결과 보기") : "다음"} →</button>
     </nav>
     <p class="shortcuts">단축키: <kbd>1</kbd>~<kbd>${letters.length}</kbd> 보기 선택 · <kbd>Enter</kbd> 제출/다음 · <kbd>←</kbd><kbd>→</kbd> 이전/다음</p>`;
 
@@ -495,11 +520,12 @@ async function renderQuiz(sessionId) {
     $("#submit").disabled = true;
     try {
       const r = await api(`/api/questions/${qid}/answer`, {
-        method: "POST", body: { selected: [...selected], session_id: session.id },
+        method: "POST", body: { selected: [...selected], session_id: isLocal ? null : session.id },
       });
       result = r;
       inNotes = r.in_wrong_notes;
       wrongInfo = { wrong_count: r.wrong_count, last_wrong_at: r.last_wrong_at };
+      if (isLocal) { session.results[qid] = r; saveLocalSession(session); }
       showResult();
     } catch (e) {
       toast(e.message);
@@ -660,11 +686,20 @@ async function renderQuiz(sessionId) {
   memoEl.addEventListener("input", () => { $("#memo-status").textContent = ""; saveMemo(); });
   memoEl.addEventListener("blur", () => saveMemo.flush());
 
-  // --- 이동 (위치는 서버에 저장 → 새로고침/다른 날에도 이어서) ---
+  // --- 이동 ---
+  // 서버 세션: 위치를 서버에 저장 → 새로고침/다른 날에도 이어서
+  // 로컬(오답노트) 세션: 위치를 sessionStorage에 저장, 마지막 문제 다음은 없음 (결과 화면 X)
   let moving = false;
   async function go(delta) {
     const next = session.current_index + delta;
     if (next < 0 || moving) return;
+    if (isLocal) {
+      if (next >= total) return;
+      session.current_index = next;
+      saveLocalSession(session);
+      route();
+      return;
+    }
     moving = true;
     try {
       await api(`/api/sessions/${session.id}`, { method: "PATCH", body: { current_index: next } });
@@ -834,14 +869,16 @@ async function renderWrongNotes() {
     if (filter.section) parts.push(sectionLabel(filter.section === NULL_SECTION ? null : filter.section));
     return parts.join(" · ");
   };
-  $("#retry-all").addEventListener("click", () => startSession(ids, listLabel()));
-  // 문제 클릭: 이 목록으로 새 테스트를 만들고 클릭한 문제에서 시작
-  const open = (item) => startSession(ids, listLabel(), {}, Number(item.dataset.index));
+  // 오답노트 연습은 서버에 세션을 만들지 않고 브라우저에만 임시로 들고 있는다 (startLocalSession)
+  $("#retry-all").addEventListener("click", () => startLocalSession(ids, notes.map((n) => n.number), listLabel()));
+  // 문제 클릭: 이 목록으로 연습을 시작하고 클릭한 문제에서 시작
+  const open = (item) => startLocalSession(ids, notes.map((n) => n.number), listLabel(), Number(item.dataset.index));
   for (const item of $$(".note-item")) {
     item.addEventListener("click", (e) => { if (!e.target.closest("details")) open(item); });
     item.addEventListener("keydown", (e) => { if (e.key === "Enter" && e.target === item) open(item); });
   }
 }
 
+$("#exam-switch").addEventListener("click", () => { location.hash = "#/exam"; });
 window.addEventListener("hashchange", route);
 route();
