@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>ACE Quiz</title>
+  <title>GCP Quiz</title>
   <link rel="icon" href="data:,">
   <link rel="stylesheet" href="/style.css">
   <script src="https://cdn.jsdelivr.net/npm/marked@15/marked.min.js"></script>
@@ -11,11 +11,12 @@
 </head>
 <body>
   <header class="topbar">
-    <a class="brand" href="#/">ACE Quiz</a>
-    <nav>
+    <a class="brand" id="brand" href="#/exam">GCP Quiz</a>
+    <nav id="main-nav">
       <a href="#/" data-route="home">범위 선택</a>
       <a href="#/quiz" data-route="quiz">풀이</a>
       <a href="#/wrong-notes" data-route="wrong-notes">오답노트</a>
+      <a href="#/exam" data-route="exam">시험 변경</a>
     </nav>
   </header>
   <main id="app"></main>

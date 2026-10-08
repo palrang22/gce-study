@@ -143,6 +143,17 @@ input.wide { width: 100%; max-width: 420px; }
 }
 .badge.multi { background: var(--primary); color: var(--primary-text); }
 
+/* ---------- 시험 선택 ---------- */
+.exam-list { list-style: none; margin: 16px 0 0; padding: 0; display: flex; flex-direction: column; gap: 12px; }
+.exam-item {
+  padding: 16px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  cursor: pointer;
+}
+.exam-item:hover, .exam-item:focus-visible { background: var(--surface-2); border-color: var(--primary); }
+.exam-title { font-weight: 700; font-size: 1.1rem; }
+
 /* ---------- 범위 선택 ---------- */
 fieldset { border: none; padding: 0; margin: 20px 0 0; }
 legend { font-weight: 600; margin-bottom: 8px; padding: 0; }
@@ -153,7 +164,11 @@ legend { font-weight: 600; margin-bottom: 8px; padding: 0; }
 
 /* ---------- 문제 풀이 ---------- */
 .progress { margin-bottom: 12px; }
-.progress-text { display: flex; justify-content: space-between; font-size: .9rem; color: var(--muted); margin-bottom: 6px; }
+.progress-text { display: flex; align-items: center; gap: 12px; font-size: .9rem; color: var(--muted); margin-bottom: 6px; }
+.progress-text > span:last-child { margin-left: auto; }
+.jump-form { display: flex; gap: 6px; }
+.jump-form input { width: 100px; padding: 4px 8px; font-size: .85rem; }
+.jump-form button { padding: 4px 10px; font-size: .85rem; }
 .bar { height: 6px; border-radius: 3px; background: var(--surface-2); overflow: hidden; }
 .bar span { display: block; height: 100%; background: var(--primary); transition: width .2s; }
 .bar.thin { height: 4px; margin: 6px 0; }
@@ -222,6 +237,16 @@ code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: .
 .md > :first-child { margin-top: 0; }
 .md > :last-child { margin-bottom: 0; }
 .md pre { background: var(--surface); }
+
+.ai-messages { margin-top: 16px; display: flex; flex-direction: column; gap: 10px; }
+.ai-msg { border-radius: 10px; padding: 10px 12px; }
+.ai-msg.user { background: var(--primary); color: var(--primary-text); align-self: flex-end; max-width: 85%; }
+.ai-msg.model { background: var(--surface); border: 1px solid var(--border); }
+.ai-msg-role { font-size: .75rem; font-weight: 600; opacity: .7; margin-bottom: 2px; }
+.ai-msg.user .ai-msg-content { white-space: pre-wrap; }
+.ai-msg.model .md, .ai-msg.model .ai-msg-content > :first-child { margin-top: 0; }
+.ai-ask { display: flex; gap: 8px; margin-top: 14px; }
+.ai-ask input { flex: 1; }
 
 .memo { margin-top: 20px; }
 .memo label { font-weight: 600; display: block; margin-bottom: 6px; }

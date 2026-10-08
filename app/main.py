@@ -15,7 +15,7 @@ from app import ai
 from app.db import ROOT, connect, init_db, question_from_row
 
 STATIC_DIR = Path(__file__).resolve().parent / "static"
-IMAGES_DIR = ROOT / "questions"
+IMAGES_DIR = ROOT / "data" / "pics"
 IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".gif", ".webp"}
 
 
@@ -53,6 +53,32 @@ def normalize_selected(selected: list[str], options: dict) -> list[str]:
 # ---------- 범위 선택 ----------
 
 NULL_SECTION = "null"  # section 파라미터에서 섹션 없는 문제를 가리키는 값
+EXAM_LABELS = {"ACE": "Associate Cloud Engineer", "PCA": "Professional Cloud Architect"}
+
+
+@app.get("/api/exams")
+def list_exams(conn: sqlite3.Connection = Depends(get_db)):
+    rows = conn.execute(
+        """
+        SELECT q.exam,
+               COUNT(DISTINCT q.id) AS total,
+               COUNT(DISTINCT a.question_id) AS solved,
+               COALESCE(SUM(a.is_correct), 0) AS correct,
+               COUNT(a.id) AS attempts
+        FROM questions q LEFT JOIN attempts a ON a.question_id = q.id
+        GROUP BY q.exam ORDER BY q.exam
+        """
+    ).fetchall()
+    return [
+        {
+            "exam": r["exam"],
+            "label": EXAM_LABELS.get(r["exam"], r["exam"]),
+            "total": r["total"],
+            "solved": r["solved"],
+            "accuracy": round(r["correct"] / r["attempts"], 3) if r["attempts"] else None,
+        }
+        for r in rows
+    ]
 
 
 def section_filter(section: list[str]) -> tuple[str, list[str]]:
@@ -67,15 +93,17 @@ def section_filter(section: list[str]) -> tuple[str, list[str]]:
 
 
 @app.get("/api/sections")
-def list_sections(conn: sqlite3.Connection = Depends(get_db)):
+def list_sections(exam: str = Query(..., description="ACE | PCA"), conn: sqlite3.Connection = Depends(get_db)):
     rows = conn.execute(
-        "SELECT section, COUNT(*) AS count FROM questions GROUP BY section ORDER BY section"
+        "SELECT section, COUNT(*) AS count FROM questions WHERE exam = ? GROUP BY section ORDER BY section",
+        (exam,),
     ).fetchall()
     return [dict(r) for r in rows]
 
 
 @app.get("/api/questions")
 def list_question_ids(
+    exam: str = Query(..., description="ACE | PCA"),
     from_: int | None = Query(None, alias="from", description="시작 번호 (포함)"),
     to: int | None = Query(None, description="끝 번호 (포함)"),
     section: list[str] | None = Query(None, description=f"여러 개 가능. 섹션 없는 문제는 '{NULL_SECTION}'"),
@@ -83,7 +111,7 @@ def list_question_ids(
     shuffle: bool = False,
     conn: sqlite3.Connection = Depends(get_db),
 ):
-    where, params = [], []
+    where, params = ["q.exam = ?"], [exam]
     if from_ is not None:
         where.append("q.number >= ?")
         params.append(from_)
@@ -121,6 +149,7 @@ def get_question(question_id: int, conn: sqlite3.Connection = Depends(get_db)):
     return {
         "id": q["id"],
         "number": q["number"],
+        "exam": q["exam"],
         "section": q["section"],
         "question": q["question"],
         "options": q["options"],
@@ -201,6 +230,7 @@ WRONG_NOTE_SORTS = {
 
 @app.get("/api/wrong-notes")
 def list_wrong_notes(
+    exam: str = Query(..., description="ACE | PCA"),
     section: list[str] | None = Query(None, description=f"섹션 없는 문제는 '{NULL_SECTION}'"),
     min_wrong: int = Query(0, ge=0, description="이 횟수 이상 틀린 문제만 (예: 2)"),
     sort: str = Query("number", pattern="^(number|recent|count)$"),
@@ -216,16 +246,17 @@ def list_wrong_notes(
             FROM wrong_notes w
             JOIN questions q ON q.id = w.question_id
             LEFT JOIN attempts a ON a.question_id = q.id AND a.is_correct = 0
-            WHERE w.active = 1 {section}
+            WHERE w.active = 1 AND q.exam = ? {section}
             GROUP BY q.id
         ) q
         WHERE wrong_count >= ?
     """
-    params: list = []
+    params: list = [exam]
     section_sql = ""
     if section:
-        clause, params = section_filter(section)
+        clause, section_params = section_filter(section)
         section_sql = f"AND {clause}"
+        params.extend(section_params)
     params.append(min_wrong)
     rows = conn.execute(
         sql.format(section=section_sql) + f" ORDER BY {WRONG_NOTE_SORTS[sort]}", params
@@ -341,6 +372,64 @@ def create_ai_explanation(
     return explanation_out(row, cached=False)
 
 
+def get_explanation_row(conn: sqlite3.Connection, explanation_id: int) -> sqlite3.Row:
+    row = conn.execute("SELECT * FROM ai_explanations WHERE id = ?", (explanation_id,)).fetchone()
+    if row is None:
+        raise HTTPException(404, f"AI 해설 {explanation_id} 없음")
+    return row
+
+
+@app.get("/api/ai-explanations/{explanation_id}/messages")
+def list_ai_messages(explanation_id: int, conn: sqlite3.Connection = Depends(get_db)):
+    get_explanation_row(conn, explanation_id)
+    rows = conn.execute(
+        "SELECT id, role, content, created_at FROM ai_messages WHERE explanation_id = ? ORDER BY id",
+        (explanation_id,),
+    ).fetchall()
+    return [dict(r) for r in rows]
+
+
+class AiMessageIn(BaseModel):
+    content: str
+
+
+@app.post("/api/ai-explanations/{explanation_id}/messages")
+def create_ai_message(explanation_id: int, body: AiMessageIn, conn: sqlite3.Connection = Depends(get_db)):
+    content = body.content.strip()
+    if not content:
+        raise HTTPException(400, "질문이 비어 있음")
+    exp = get_explanation_row(conn, explanation_id)
+    q = question_from_row(get_question_row(conn, exp["question_id"]))
+    selected = json.loads(exp["selected"])
+    prior = [
+        dict(r)
+        for r in conn.execute(
+            "SELECT role, content FROM ai_messages WHERE explanation_id = ? ORDER BY id",
+            (explanation_id,),
+        )
+    ]
+
+    # 질문은 먼저 저장해둔다 (답변 생성이 실패해도 무엇을 물어봤는지는 남도록)
+    conn.execute(
+        "INSERT INTO ai_messages (explanation_id, role, content) VALUES (?, 'user', ?)",
+        (explanation_id, content),
+    )
+    try:
+        answer, _model = ai.generate_followup(q, selected, exp["content"], prior, content)
+    except Exception as e:
+        raise HTTPException(502, f"AI 응답 생성 실패: {e}") from e
+
+    cur = conn.execute(
+        "INSERT INTO ai_messages (explanation_id, role, content) VALUES (?, 'model', ?)",
+        (explanation_id, answer),
+    )
+    rows = conn.execute(
+        "SELECT id, role, content, created_at FROM ai_messages WHERE explanation_id = ? AND id >= ? ORDER BY id",
+        (explanation_id, cur.lastrowid - 1),
+    ).fetchall()
+    return [dict(r) for r in rows]
+
+
 # ---------- 테스트 세션 ----------
 
 def get_session_row(conn: sqlite3.Connection, session_id: int) -> sqlite3.Row:
@@ -373,6 +462,7 @@ def session_summary(conn: sqlite3.Connection, row: sqlite3.Row) -> dict:
     ).fetchone()
     return {
         "id": row["id"],
+        "exam": row["exam"],
         "label": row["label"],
         "params": json.loads(row["params"]),
         "total": len(ids),
@@ -385,6 +475,7 @@ def session_summary(conn: sqlite3.Connection, row: sqlite3.Row) -> dict:
 
 
 class SessionIn(BaseModel):
+    exam: str
     label: str
     question_ids: list[int]
     params: dict = {}
@@ -397,23 +488,25 @@ def create_session(body: SessionIn, conn: sqlite3.Connection = Depends(get_db)):
     found = {
         r["id"]
         for r in conn.execute(
-            f"SELECT id FROM questions WHERE id IN ({','.join('?' * len(body.question_ids))})",
-            body.question_ids,
+            f"SELECT id FROM questions WHERE exam = ? AND id IN ({','.join('?' * len(body.question_ids))})",
+            [body.exam, *body.question_ids],
         )
     }
     missing = [i for i in body.question_ids if i not in found]
     if missing:
-        raise HTTPException(400, f"없는 문제: {missing[:10]}")
+        raise HTTPException(400, f"없는 문제(또는 다른 시험 문제): {missing[:10]}")
     cur = conn.execute(
-        "INSERT INTO test_sessions (label, params, question_ids) VALUES (?, ?, ?)",
-        (body.label.strip() or "테스트", json.dumps(body.params, ensure_ascii=False), json.dumps(body.question_ids)),
+        "INSERT INTO test_sessions (exam, label, params, question_ids) VALUES (?, ?, ?, ?)",
+        (body.exam, body.label.strip() or "테스트", json.dumps(body.params, ensure_ascii=False), json.dumps(body.question_ids)),
     )
     return session_summary(conn, get_session_row(conn, cur.lastrowid))
 
 
 @app.get("/api/sessions")
-def list_sessions(conn: sqlite3.Connection = Depends(get_db)):
-    rows = conn.execute("SELECT * FROM test_sessions ORDER BY updated_at DESC, id DESC").fetchall()
+def list_sessions(exam: str = Query(..., description="ACE | PCA"), conn: sqlite3.Connection = Depends(get_db)):
+    rows = conn.execute(
+        "SELECT * FROM test_sessions WHERE exam = ? ORDER BY updated_at DESC, id DESC", (exam,)
+    ).fetchall()
     return [session_summary(conn, r) for r in rows]
 
 
@@ -437,9 +530,17 @@ def get_session(session_id: int, conn: sqlite3.Connection = Depends(get_db)):
             "explanation": a["explanation"],
             "answered_at": a["created_at"],
         }
+    ids = json.loads(row["question_ids"])
+    number_by_id = {
+        r["id"]: r["number"]
+        for r in conn.execute(
+            f"SELECT id, number FROM questions WHERE id IN ({','.join('?' * len(ids))})", ids
+        )
+    }
     return {
         **session_summary(conn, row),
-        "question_ids": json.loads(row["question_ids"]),
+        "question_ids": ids,
+        "numbers": [number_by_id[i] for i in ids],  # question_ids와 같은 순서. 번호로 이동할 때 씀
         "results": results,
     }
 
@@ -475,7 +576,7 @@ def delete_session(session_id: int, conn: sqlite3.Connection = Depends(get_db)):
 # ---------- 통계 ----------
 
 @app.get("/api/stats")
-def get_stats(conn: sqlite3.Connection = Depends(get_db)):
+def get_stats(exam: str = Query(..., description="ACE | PCA"), conn: sqlite3.Connection = Depends(get_db)):
     rows = conn.execute(
         """
         SELECT q.section,
@@ -484,8 +585,10 @@ def get_stats(conn: sqlite3.Connection = Depends(get_db)):
                COUNT(a.id) AS attempts,
                COALESCE(SUM(a.is_correct), 0) AS correct
         FROM questions q LEFT JOIN attempts a ON a.question_id = q.id
+        WHERE q.exam = ?
         GROUP BY q.section ORDER BY q.section
-        """
+        """,
+        (exam,),
     ).fetchall()
 
     def with_rate(d: dict) -> dict:
@@ -501,11 +604,12 @@ def get_stats(conn: sqlite3.Connection = Depends(get_db)):
 
 # ---------- 정적 파일 ----------
 
-@app.get("/images/{name}")
+@app.get("/images/{name:path}")
 def get_image(name: str):
-    """questions/ 의 문제 그림. PDF 등 다른 파일은 내보내지 않는다."""
-    path = (IMAGES_DIR / name).resolve()
-    if path.parent != IMAGES_DIR.resolve() or path.suffix.lower() not in IMAGE_SUFFIXES or not path.is_file():
+    """data/pics/<exam>/Qn.png 문제 그림. name은 "ace/Q42.png"처럼 시험 하위 폴더를 포함한다."""
+    base = IMAGES_DIR.resolve()
+    path = (base / name).resolve()
+    if base not in path.parents or path.suffix.lower() not in IMAGE_SUFFIXES or not path.is_file():
         raise HTTPException(404, "이미지 없음")
     return FileResponse(path)
 

@@ -1,14 +1,13 @@
-"""data/questions.json 형식 검증. 문제가 있는 항목을 표로 출력한다."""
+"""data/questions_<exam>.json 형식 검증. 문제가 있는 항목을 표로 출력한다."""
 import json
 from collections import Counter
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
-JSON_PATH = ROOT / "data" / "questions.json"
+JSON_PATHS = [ROOT / "data" / "questions_ace.json", ROOT / "data" / "questions_pca.json"]
 
 
-def main() -> None:
-    questions = json.loads(JSON_PATH.read_text(encoding="utf-8"))
+def validate_one(exam: str, questions: list[dict]) -> list[tuple]:
     rows = []  # (번호, 항목, 내용)
 
     numbers = [q["number"] for q in questions]
@@ -32,12 +31,25 @@ def main() -> None:
         for w in q["parse_warnings"]:
             rows.append((n, "파서 경고", w))
 
-    print(f"총 {len(questions)}문제, 이상 항목 {len(rows)}건\n")
+    print(f"\n[{exam}] 총 {len(questions)}문제, 이상 항목 {len(rows)}건")
     if rows:
         print(f"{'번호':>5}  {'항목':<12}  내용")
         print("-" * 70)
         for n, kind, detail in sorted(rows):
             print(f"{'Q' + str(n):>5}  {kind:<12}  {detail}")
+    return rows
+
+
+def main() -> None:
+    total_rows = 0
+    for path in JSON_PATHS:
+        if not path.exists():
+            print(f"건너뜀 (없음): {path}")
+            continue
+        questions = json.loads(path.read_text(encoding="utf-8"))
+        exam = questions[0]["exam"] if questions else path.stem
+        total_rows += len(validate_one(exam, questions))
+    print(f"\n전체 이상 항목: {total_rows}건")
 
 
 if __name__ == "__main__":

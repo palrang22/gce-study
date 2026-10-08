@@ -15,7 +15,12 @@ load_dotenv()
 
 TIMEOUT_MS = 90_000
 
-PROMPT_TEMPLATE = """너는 Google Cloud ACE(Associate Cloud Engineer) 시험 튜터야.
+EXAM_NAMES = {
+    "ACE": "ACE(Associate Cloud Engineer)",
+    "PCA": "PCA(Professional Cloud Architect)",
+}
+
+PROMPT_TEMPLATE = """너는 Google Cloud {exam_name} 시험 튜터야.
 클라우드 초심자에게 설명하듯 한국어로 답해. GCP 서비스명과 명령어는 영어 그대로 써.
 
 [문제]
@@ -69,7 +74,9 @@ def build_prompt(question: dict, selected: list[str]) -> str:
     if explanation.startswith("http"):
         # 이 문제집은 해설 대신 examtopics 토론 링크만 있다
         explanation = f"(해설 문장 없음, 토론 링크만 있음: {explanation})"
+    exam = question.get("exam", "ACE")
     return PROMPT_TEMPLATE.format(
+        exam_name=EXAM_NAMES.get(exam, exam),
         question=question["question"],
         options="\n".join(f"{k}. {v}" for k, v in question["options"].items()),
         answer=", ".join(question["answer"]),
@@ -84,6 +91,41 @@ def generate_explanation(question: dict, selected: list[str]) -> tuple[str, str]
     response = _client().models.generate_content(
         model=model,
         contents=build_prompt(question, selected),
+        config=types.GenerateContentConfig(
+            automatic_function_calling=types.AutomaticFunctionCallingConfig(disable=True),
+        ),
+    )
+    text = (response.text or "").strip()
+    if not text:
+        raise RuntimeError("모델이 빈 응답을 반환함")
+    return text, model
+
+
+def generate_followup(
+    question: dict,
+    selected: list[str],
+    base_explanation: str,
+    prior_messages: list[dict],
+    new_question: str,
+) -> tuple[str, str]:
+    """AI 해설에 이어서 질문 하나를 더 묻는다. (답변, 모델명) 반환.
+
+    prior_messages: [{"role": "user"|"model", "content": "..."}] 이 질문 이전까지의 대화, 오래된 순.
+    매 호출마다 처음 해설부터 전체 맥락을 다시 보내는 stateless 방식 (서버에 세션을 들고 있지 않음).
+    """
+    model = _env("GEMINI_MODEL")
+    contents = [
+        types.Content(role="user", parts=[types.Part(text=build_prompt(question, selected))]),
+        types.Content(role="model", parts=[types.Part(text=base_explanation)]),
+    ]
+    for m in prior_messages:
+        role = "model" if m["role"] == "model" else "user"
+        contents.append(types.Content(role=role, parts=[types.Part(text=m["content"])]))
+    contents.append(types.Content(role="user", parts=[types.Part(text=new_question)]))
+
+    response = _client().models.generate_content(
+        model=model,
+        contents=contents,
         config=types.GenerateContentConfig(
             automatic_function_calling=types.AutomaticFunctionCallingConfig(disable=True),
         ),

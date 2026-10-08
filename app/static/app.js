@@ -1,13 +1,18 @@
-// ACE Quiz 프론트엔드. 해시 라우팅: #/ (범위 선택), #/quiz/{세션id} (풀이), #/wrong-notes (오답노트)
+// GCP Quiz 프론트엔드. 해시 라우팅: #/exam (시험 선택), #/ (범위 선택), #/quiz/{세션id} (풀이), #/wrong-notes (오답노트)
 // 테스트 세션(문제 순서, 위치, 제출 결과)은 서버 DB에 저장된다.
 
 const $ = (sel, el = document) => el.querySelector(sel);
 const $$ = (sel, el = document) => [...el.querySelectorAll(sel)];
 const app = $("#app");
 
-const HOME_KEY = "aceQuiz.home";          // 범위 선택 폼 값
-const NOTES_KEY = "aceQuiz.notesFilter";  // 오답노트 필터
+const EXAM_KEY = "quiz.exam";             // 현재 고른 시험 ("ACE" | "PCA")
 const NULL_SECTION = "null";
+const EXAM_LABELS = { ACE: "Associate Cloud Engineer", PCA: "Professional Cloud Architect" };
+
+const getExam = () => sessionStorage.getItem(EXAM_KEY) || "";
+const setExam = (exam) => sessionStorage.setItem(EXAM_KEY, exam);
+const homeKey = () => `quiz.home.${getExam()}`;          // 범위 선택 폼 값 (시험별)
+const notesKey = () => `quiz.notesFilter.${getExam()}`;  // 오답노트 필터 (시험별)
 
 // ---------- 유틸 ----------
 
@@ -125,16 +130,57 @@ function route() {
   if (cleanup) { cleanup(); cleanup = null; }
   const hash = location.hash || "#/";
   const quiz = hash.match(/^#\/quiz(?:\/(\d+))?/);
-  const name = quiz ? "quiz" : hash.startsWith("#/wrong-notes") ? "wrong-notes" : "home";
+  const name = hash.startsWith("#/exam") ? "exam"
+    : quiz ? "quiz"
+    : hash.startsWith("#/wrong-notes") ? "wrong-notes"
+    : "home";
+
+  if (name !== "exam" && !getExam()) {
+    location.hash = "#/exam";
+    return;
+  }
+
   $$(".topbar nav a").forEach((a) => a.classList.toggle("active", a.dataset.route === name));
+  $("#main-nav").hidden = name === "exam";
+  $("#brand").textContent = getExam() ? `GCP Quiz · ${getExam()}` : "GCP Quiz";
+
   const render =
-    name === "quiz" ? () => renderQuiz(quiz[1] ? Number(quiz[1]) : null)
+    name === "exam" ? renderExamPicker
+    : name === "quiz" ? () => renderQuiz(quiz[1] ? Number(quiz[1]) : null)
     : name === "wrong-notes" ? renderWrongNotes
     : renderHome;
   render().catch((e) => {
     app.innerHTML = `<div class="card"><p>불러오지 못했어요: ${escapeHtml(e.message)}</p>
       <a href="#/">범위 선택으로 가기</a></div>`;
   });
+}
+
+// ---------- 시험 선택 ----------
+
+async function renderExamPicker() {
+  const rid = ++renderId;
+  app.innerHTML = `<p class="muted">불러오는 중…</p>`;
+  const exams = await api("/api/exams");
+  if (rid !== renderId) return;
+
+  window.scrollTo(0, 0);
+  app.innerHTML = `
+    <section class="card">
+      <h1>어떤 시험을 공부할까요?</h1>
+      <ul class="exam-list">
+        ${exams.map((e) => `
+          <li class="exam-item" data-exam="${escapeHtml(e.exam)}" tabindex="0">
+            <div class="exam-title">${escapeHtml(e.exam)} <span class="muted">· ${escapeHtml(e.label)}</span></div>
+            <div class="muted small">전체 ${e.total}문제 · 푼 문제 ${e.solved}${e.accuracy != null ? ` · 정답률 ${formatRate(e.accuracy)}` : ""}</div>
+          </li>`).join("")}
+      </ul>
+    </section>`;
+
+  const choose = (exam) => { setExam(exam); location.hash = "#/"; };
+  for (const item of $$(".exam-item")) {
+    item.addEventListener("click", () => choose(item.dataset.exam));
+    item.addEventListener("keydown", (e) => { if (e.key === "Enter") choose(item.dataset.exam); });
+  }
 }
 
 function openSession(id) {
@@ -146,7 +192,9 @@ function openSession(id) {
 async function startSession(ids, label, params = {}, startIndex = 0) {
   if (!ids.length) { toast("풀 문제가 없어요"); return; }
   try {
-    const s = await api("/api/sessions", { method: "POST", body: { label, question_ids: ids, params } });
+    const s = await api("/api/sessions", {
+      method: "POST", body: { exam: getExam(), label, question_ids: ids, params },
+    });
     if (startIndex) {
       await api(`/api/sessions/${s.id}`, { method: "PATCH", body: { current_index: startIndex } });
     }
@@ -181,12 +229,15 @@ function sessionCard(s) {
 async function renderHome() {
   const rid = ++renderId;
   app.innerHTML = `<p class="muted">불러오는 중…</p>`;
+  const exam = getExam();
   const [sections, stats, sessions] = await Promise.all([
-    api("/api/sections"), api("/api/stats"), api("/api/sessions"),
+    api("/api/sections", { params: { exam } }),
+    api("/api/stats", { params: { exam } }),
+    api("/api/sessions", { params: { exam } }),
   ]);
   if (rid !== renderId) return;
 
-  const saved = loadJSON(HOME_KEY) || {};
+  const saved = loadJSON(homeKey()) || {};
   const o = stats.overall;
   const savedSections = saved.sections;
   const sectionValue = (s) => s.section ?? NULL_SECTION;
@@ -248,7 +299,7 @@ async function renderHome() {
     mode: form.mode.value,
     shuffle: form.shuffle.checked,
   });
-  const toParams = (f) => ({ from: f.from, to: f.to, section: f.sections, mode: f.mode, shuffle: f.shuffle });
+  const toParams = (f) => ({ exam, from: f.from, to: f.to, section: f.sections, mode: f.mode, shuffle: f.shuffle });
   const autoLabel = (f) => {
     const modeLabel = { all: "전체", wrong: "오답노트", unsolved: "안 푼 문제" }[f.mode];
     const range = f.from || f.to ? `${f.from || 1}~${f.to || o.total}번` : "전 범위";
@@ -257,7 +308,7 @@ async function renderHome() {
 
   const updatePreview = debounce(async () => {
     const f = readForm();
-    saveJSON(HOME_KEY, f);
+    saveJSON(homeKey(), f);
     form.label.placeholder = autoLabel(f);
     const out = $("#preview-count");
     if (!out) return;
@@ -313,7 +364,7 @@ async function renderQuiz(sessionId) {
   const rid = ++renderId;
   if (sessionId == null) {
     // #/quiz 만 열면 가장 최근 테스트로
-    const sessions = await api("/api/sessions");
+    const sessions = await api("/api/sessions", { params: { exam: getExam() } });
     if (rid !== renderId) return;
     if (!sessions.length) {
       app.innerHTML = `<div class="card"><p>저장된 테스트가 없어요.</p><a href="#/">새 테스트 시작하기</a></div>`;
@@ -344,6 +395,10 @@ async function renderQuiz(sessionId) {
     <div class="progress">
       <div class="progress-text">
         <span>${escapeHtml(session.label)}</span>
+        <form id="jump-form" class="jump-form">
+          <input type="number" id="jump-input" min="1" placeholder="번호로 이동" aria-label="번호로 이동">
+          <button type="submit">이동</button>
+        </form>
         <span>${session.current_index + 1} / ${total}</span>
       </div>
       <div class="bar"><span style="width:${((session.current_index + 1) / total) * 100}%"></span></div>
@@ -361,7 +416,7 @@ async function renderQuiz(sessionId) {
       ${q.images.length ? `
         <details class="figures">
           <summary>원본 그림 보기 (${q.images.length})</summary>
-          ${q.images.map((src) => `<img src="/images/${encodeURIComponent(src)}" alt="Q${q.number} 원본 그림" loading="lazy">`).join("")}
+          ${q.images.map((src) => `<img src="/images/${src.split("/").map(encodeURIComponent).join("/")}" alt="Q${q.number} 원본 그림" loading="lazy">`).join("")}
         </details>` : ""}
       <div class="options" id="options" role="${q.multi ? "group" : "radiogroup"}">
         ${letters.map((l, i) => `
@@ -485,7 +540,16 @@ async function renderQuiz(sessionId) {
   }
 
   // --- AI 해설 ---
-  const ai = { loading: false, data: null, error: null };
+  const ai = { loading: false, data: null, error: null, messages: [], msgLoading: false, msgError: null };
+
+  function aiMessageHtml(m) {
+    return `
+      <div class="ai-msg ${m.role}">
+        <div class="ai-msg-role">${m.role === "user" ? "나" : "AI"}</div>
+        <div class="ai-msg-content">${m.role === "model" ? renderMarkdown(m.content) : escapeHtml(m.content)}</div>
+      </div>`;
+  }
+
   function paintAi() {
     const area = $("#ai-area");
     if (!result) { area.innerHTML = ""; return; }
@@ -495,6 +559,7 @@ async function renderQuiz(sessionId) {
         <button id="ai-generate" ${ai.loading ? "disabled" : ""}>${ai.loading ? "AI 해설 생성 중…" : "AI 해설"}</button>${err}`;
       return;
     }
+    const msgErr = ai.msgError ? `<p class="ai-error">${escapeHtml(ai.msgError)}</p>` : "";
     area.innerHTML = `
       <div class="ai-box">
         <div class="ai-head">
@@ -505,15 +570,30 @@ async function renderQuiz(sessionId) {
         </div>
         <div class="md">${renderMarkdown(ai.data.content)}</div>
         ${err}
+        ${ai.messages.length ? `<div class="ai-messages">${ai.messages.map(aiMessageHtml).join("")}</div>` : ""}
+        <form class="ai-ask" id="ai-ask-form">
+          <input type="text" id="ai-ask-input" placeholder="이어서 질문하기" maxlength="2000" ${ai.msgLoading ? "disabled" : ""}>
+          <button type="submit" ${ai.msgLoading ? "disabled" : ""}>${ai.msgLoading ? "답변 중…" : "질문"}</button>
+        </form>
+        ${msgErr}
       </div>`;
   }
   $("#ai-area").addEventListener("click", (e) => {
     if (e.target.closest("#ai-generate")) requestAi(false);
     if (e.target.closest("#ai-regenerate")) requestAi(true);
   });
+  $("#ai-area").addEventListener("submit", (e) => {
+    if (e.target.id === "ai-ask-form") { e.preventDefault(); askAi(); }
+  });
+  async function loadAiMessages() {
+    try {
+      ai.messages = await api(`/api/ai-explanations/${ai.data.id}/messages`);
+    } catch { /* 못 불러오면 빈 대화로 시작 */ }
+  }
   async function loadSavedAi() {
     try {
       ai.data = await api(`/api/questions/${qid}/ai-explain`, { params: { selected: result.selected.join(",") } });
+      await loadAiMessages();
     } catch (e) {
       if (e.status !== 404) ai.error = e.message;
     }
@@ -528,11 +608,35 @@ async function renderQuiz(sessionId) {
       ai.data = await api(`/api/questions/${qid}/ai-explain`, {
         method: "POST", params: { force }, body: { selected: result.selected },
       });
+      ai.messages = [];
+      await loadAiMessages();
     } catch (e) {
       ai.error = `AI 해설을 만들지 못했어요: ${e.message}`;
     } finally {
       ai.loading = false;
       if (rid === renderId) paintAi();
+    }
+  }
+  async function askAi() {
+    const input = $("#ai-ask-input");
+    const content = input.value.trim();
+    if (!content || ai.msgLoading) return;
+    input.value = "";
+    ai.msgLoading = true;
+    ai.msgError = null;
+    ai.messages = [...ai.messages, { role: "user", content, pending: true }];
+    paintAi();
+    try {
+      const added = await api(`/api/ai-explanations/${ai.data.id}/messages`, {
+        method: "POST", body: { content },
+      });
+      ai.messages = [...ai.messages.slice(0, -1), ...added];
+    } catch (e) {
+      // 질문은 서버에 이미 저장됐을 수 있어서 낙관적으로 추가한 말풍선은 그대로 둔다
+      ai.msgError = `답변을 받지 못했어요: ${e.message}`;
+    } finally {
+      ai.msgLoading = false;
+      if (rid === renderId) { paintAi(); $("#ai-ask-input")?.focus(); }
     }
   }
 
@@ -572,6 +676,18 @@ async function renderQuiz(sessionId) {
   }
   $("#prev").addEventListener("click", () => go(-1));
   $("#next").addEventListener("click", () => go(1));
+
+  // --- 번호로 이동 ---
+  $("#jump-form").addEventListener("submit", (e) => {
+    e.preventDefault();
+    const input = $("#jump-input");
+    const n = Number(input.value);
+    if (!n) return;
+    const idx = session.numbers.indexOf(n);
+    if (idx === -1) { toast(`Q${n}은(는) 이 테스트 범위에 없어요`); return; }
+    input.value = "";
+    go(idx - session.current_index);
+  });
 
   // --- 단축키 ---
   function onKey(e) {
@@ -642,11 +758,17 @@ function renderFinished(session) {
 async function renderWrongNotes() {
   const rid = ++renderId;
   app.innerHTML = `<p class="muted">불러오는 중…</p>`;
-  const filter = { section: "", minWrong: 0, sort: "number", ...(loadJSON(NOTES_KEY) || {}) };
+  const exam = getExam();
+  const filter = { section: "", minWrong: 0, sort: "number", ...(loadJSON(notesKey()) || {}) };
   const [sections, notes] = await Promise.all([
-    api("/api/sections"),
+    api("/api/sections", { params: { exam } }),
     api("/api/wrong-notes", {
-      params: { section: filter.section ? [filter.section] : undefined, min_wrong: filter.minWrong || undefined, sort: filter.sort },
+      params: {
+        exam,
+        section: filter.section ? [filter.section] : undefined,
+        min_wrong: filter.minWrong || undefined,
+        sort: filter.sort,
+      },
     }),
   ]);
   if (rid !== renderId) return;
@@ -699,7 +821,7 @@ async function renderWrongNotes() {
         </ul>` : `<p class="muted">${filter.minWrong ? `${filter.minWrong}회 이상 틀린 문제가 없어요.` : "오답노트가 비어 있어요. 문제를 틀리면 자동으로 추가돼요."}</p>`}
     </section>`;
 
-  const setFilter = (patch) => { saveJSON(NOTES_KEY, { ...filter, ...patch }); route(); };
+  const setFilter = (patch) => { saveJSON(notesKey(), { ...filter, ...patch }); route(); };
   for (const chip of $$(".chip")) {
     chip.addEventListener("click", () => setFilter({ minWrong: Number(chip.dataset.min) }));
   }

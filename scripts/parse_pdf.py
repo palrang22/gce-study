@@ -1,24 +1,33 @@
-"""ACE 기출예상문제 PDF → data/questions.json 변환.
+"""ACE / PCA 기출예상문제 PDF → data/questions_<exam>.json 변환.
 
-PDF 패턴 (Examtopics Q375 덤프):
+PDF 패턴 (Examtopics 덤프):
     Q<번호>
     지문 (여러 줄)
     A. 보기 (여러 줄로 이어질 수 있음)
     ...
     Answer: B        # 복수정답은 "Answer: B, E"
     https://www.examtopics.com/discussions/...   # 해설 대신 토론 링크 (두 줄로 잘림)
+
+여러 시험을 다루므로 id 충돌을 막기 위해 시험별로 id 오프셋을 둔다 (ACE: 0, PCA: 10000).
 """
 import json
 import re
+import sys
 from pathlib import Path
 
 import pdfplumber
 
 ROOT = Path(__file__).resolve().parent.parent
-PDF_PATH = ROOT / "questions" / "GCP-ACE.pdf"
+QUESTIONS_DIR = ROOT / "questions"
+DATA_DIR = ROOT / "data"
+PICS_DIR = DATA_DIR / "pics"
+
+EXAMS = {
+    "ACE": {"pdf": QUESTIONS_DIR / "GCP-ACE.pdf", "offset": 0, "out": DATA_DIR / "questions_ace.json"},
+    "PCA": {"pdf": QUESTIONS_DIR / "GCP-PCA.pdf", "offset": 10000, "out": DATA_DIR / "questions_pca.json"},
+}
 # PDF만으로 채울 수 없는 내용 (그림 옮겨 적기, 빠진 정답). 이미지 파일도 questions/ 에 있다.
-FIXES_PATH = ROOT / "questions" / "manual_fixes.json"
-OUT_PATH = ROOT / "data" / "questions.json"
+FIXES_PATH = QUESTIONS_DIR / "manual_fixes.json"
 
 Q_RE = re.compile(r"^Q(\d+)$")
 OPTION_RE = re.compile(r"^([A-F])\.\s*(.*)$")
@@ -32,6 +41,8 @@ MOJIBAKE = [
     ("ג€", '"'),    # 따옴표
     ('"¢', "•"),    # 글머리 기호
 ]
+# pdftotext 계열에서 보이는 bidi 래퍼(RLE ... PDF). 안에 '-'가 있으면 "--"(gcloud 플래그), 없으면 겹인용부호.
+MOJIBAKE_RE = re.compile("‫([^‬]*)‬")
 
 # 그림/표를 봐야 풀 수 있는 문제로 의심되는 표현
 FIGURE_HINTS = re.compile(
@@ -44,6 +55,7 @@ FIGURE_HINTS = re.compile(
 def fix_text(text: str) -> str:
     for bad, good in MOJIBAKE:
         text = text.replace(bad, good)
+    text = MOJIBAKE_RE.sub(lambda m: "--" if "-" in m.group(1) else '"', text)
     return text
 
 
@@ -66,38 +78,34 @@ def join_lines(lines: list[str]) -> str:
     return out
 
 
-def extract_lines() -> tuple[list[tuple[int, str]], set[int]]:
-    """(페이지 번호, 줄) 목록과 이미지가 있는 페이지 번호 집합."""
-    lines, image_pages = [], set()
-    with pdfplumber.open(PDF_PATH) as pdf:
-        for page_no, page in enumerate(pdf.pages, start=1):
-            if page.images:
-                image_pages.add(page_no)
+def extract_lines(pdf_path: Path) -> list[str]:
+    lines = []
+    with pdfplumber.open(pdf_path) as pdf:
+        for page in pdf.pages:
             for line in (page.extract_text() or "").splitlines():
-                lines.append((page_no, fix_text(line)))
-    return lines, image_pages
+                lines.append(fix_text(line))
+    return lines
 
 
-def split_blocks(lines: list[tuple[int, str]]) -> list[tuple[int, list[tuple[int, str]]]]:
+def split_blocks(lines: list[str]) -> list[tuple[int, list[str]]]:
     """Q<번호> 줄 기준으로 문제 블록을 자른다. 첫 문제 앞(머리말)은 버린다."""
     blocks, current = [], None
-    for page_no, line in lines:
+    for line in lines:
         m = Q_RE.match(line.strip())
         if m:
             current = (int(m.group(1)), [])
             blocks.append(current)
         elif current is not None:
-            current[1].append((page_no, line))
+            current[1].append(line)
     return blocks
 
 
-def parse_block(number: int, body: list[tuple[int, str]], image_pages: set[int]) -> dict:
+def parse_block(number: int, body: list[str]) -> dict:
     warnings = []
     question_lines, options, answer_raw, url_lines = [], {}, None, []
     current_option = None
-    pages = {p for p, _ in body}
 
-    for _, line in body:
+    for line in body:
         stripped = line.strip()
         if answer_raw is not None:
             # 정답 뒤에는 토론 링크만 온다 (URL이 두 줄로 잘려 있음)
@@ -141,15 +149,10 @@ def parse_block(number: int, body: list[tuple[int, str]], image_pages: set[int])
     if not explanation:
         warnings.append("토론 링크 없음")
     if FIGURE_HINTS.search(question) or any(v.endswith(":") for v in options.values()):
-        hint = "그림/표 참조 문제로 보임 (PDF에 이미지로만 있음)"
-        if pages & image_pages:
-            hint += f", 이미지 페이지: {sorted(pages & image_pages)}"
-        warnings.append(hint)
+        warnings.append("그림/표 참조 문제로 보임 (PDF에 이미지로만 있음)")
 
     return {
-        "id": number,
         "number": number,
-        "section": None,
         "question": question,
         "options": options,
         "answer": answer,
@@ -193,24 +196,92 @@ def apply_fixes(q: dict, fix: dict) -> None:
     ]
 
 
-def main() -> None:
-    lines, image_pages = extract_lines()
-    questions = [parse_block(n, body, image_pages) for n, body in split_blocks(lines)]
+# data/pics/<exam 소문자>/Q<번호>.png (여러 장이면 -1, -2 ...) 네이밍 규칙.
+# manual_fixes.json 의 손으로 적은 "그림 삽입 위치"가 없어도, 사진만 이 규칙으로 넣으면
+# 문제 풀이 화면의 "원본 그림 보기"에 바로 뜬다 (본문에 끼워 넣지 않고 별도 섹션으로 보여줌).
+PIC_RE = re.compile(r"^Q(\d+)(?:-(\d+))?\.(png|jpe?g|gif|webp)$", re.IGNORECASE)
 
-    fixes = json.loads(FIXES_PATH.read_text(encoding="utf-8")) if FIXES_PATH.exists() else {}
+
+def attach_pics(questions: list[dict], exam: str) -> None:
+    exam_dir = PICS_DIR / exam.lower()
+    if not exam_dir.exists():
+        return
+    by_number: dict[int, list[tuple[int, str]]] = {}
+    for path in exam_dir.iterdir():
+        if not path.is_file():
+            continue
+        m = PIC_RE.match(path.name)
+        if not m:
+            print(f"[{exam}] 경고: {path.name} 이 사진 네이밍 규칙과 안 맞아서 건너뜀 (Q<번호>[-<순번>].png)")
+            continue
+        number = int(m.group(1))
+        order = int(m.group(2)) if m.group(2) else 0
+        by_number.setdefault(number, []).append((order, path.name))
+
+    by_number_q = {q["number"]: q for q in questions}
+    for number, files in by_number.items():
+        q = by_number_q.get(number)
+        if q is None:
+            print(f"[{exam}] 경고: data/pics/{exam.lower()} 에 Q{number} 사진이 있는데 해당 문제가 없음")
+            continue
+        q["images"] = [f"{exam.lower()}/{name}" for _, name in sorted(files)]
+        q["parse_warnings"] = [
+            w for w in q["parse_warnings"] if not w.startswith("그림/표 참조 문제로 보임")
+        ]
+
+
+def parse_exam(exam: str) -> list[dict]:
+    cfg = EXAMS[exam]
+    lines = extract_lines(cfg["pdf"])
+    questions = [parse_block(n, body) for n, body in split_blocks(lines)]
+
+    all_fixes = json.loads(FIXES_PATH.read_text(encoding="utf-8")) if FIXES_PATH.exists() else {}
+    fixes = all_fixes.get(exam, {})
     for q in questions:
         apply_fixes(q, fixes.get(str(q["number"]), {}))
-    print(f"수동 보정 적용: {', '.join('Q' + n for n in fixes)}")
-    OUT_PATH.parent.mkdir(parents=True, exist_ok=True)
-    OUT_PATH.write_text(json.dumps(questions, ensure_ascii=False, indent=2), encoding="utf-8")
+    if fixes:
+        print(f"[{exam}] 수동 보정 적용: {', '.join('Q' + n for n in fixes)}")
+    attach_pics(questions, exam)
 
-    warned = [q for q in questions if q["parse_warnings"]]
-    print(f"총 문제 수: {len(questions)}")
-    print(f"복수정답 문제: {sum(q['multi'] for q in questions)}")
-    print(f"경고 있는 문제: {len(warned)}")
+    out = []
+    for q in questions:
+        out.append({
+            "id": cfg["offset"] + q["number"],
+            "number": q["number"],
+            "exam": exam,
+            "section": None,
+            "question": q["question"],
+            "options": q["options"],
+            "answer": q["answer"],
+            "multi": q["multi"],
+            "explanation": q["explanation"],
+            "images": q.get("images", []),
+            "parse_warnings": q["parse_warnings"],
+        })
+
+    cfg["out"].parent.mkdir(parents=True, exist_ok=True)
+    cfg["out"].write_text(json.dumps(out, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    warned = [q for q in out if q["parse_warnings"]]
+    needs_image = [q for q in out if any(w.startswith("그림/표 참조 문제로 보임") for w in q["parse_warnings"])]
+    print(f"[{exam}] 총 문제 수: {len(out)}")
+    print(f"[{exam}] 복수정답 문제: {sum(q['multi'] for q in out)}")
+    print(f"[{exam}] 경고 있는 문제: {len(warned)}")
+    print(f"[{exam}] 사진/표 확인 필요: {', '.join(str(q['number']) for q in needs_image) or '없음'}")
     for q in warned:
         print(f"  Q{q['number']}: {' / '.join(q['parse_warnings'])}")
-    print(f"저장: {OUT_PATH}")
+    print(f"[{exam}] 저장: {cfg['out']}")
+    return out
+
+
+def main() -> None:
+    exams = sys.argv[1:] or list(EXAMS)
+    for exam in exams:
+        if exam not in EXAMS:
+            print(f"알 수 없는 exam: {exam} (가능: {', '.join(EXAMS)})")
+            sys.exit(1)
+    for exam in exams:
+        parse_exam(exam)
 
 
 if __name__ == "__main__":
