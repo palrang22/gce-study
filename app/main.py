@@ -314,6 +314,42 @@ def update_wrong_note(
     return {**dict(row), "active": bool(row["active"])}
 
 
+MEMO_SORTS = {
+    "number": "q.number",
+    "recent": "w.updated_at DESC, q.number",
+}
+
+
+@app.get("/api/memos")
+def list_memos(
+    exam: str = Query(..., description="ACE | PCA"),
+    section: list[str] | None = Query(None, description=f"섹션 없는 문제는 '{NULL_SECTION}'"),
+    sort: str = Query("number", pattern="^(number|recent)$"),
+    conn: sqlite3.Connection = Depends(get_db),
+):
+    """메모가 있는 문제 전체 (오답노트 active 여부와 무관하게)."""
+    sql = """
+        SELECT q.id AS question_id, q.number, q.section, q.question,
+               w.memo, w.active, w.added_at, w.updated_at
+        FROM wrong_notes w
+        JOIN questions q ON q.id = w.question_id
+        WHERE q.exam = ? AND w.memo != '' {section}
+    """
+    params: list = [exam]
+    section_sql = ""
+    if section:
+        clause, section_params = section_filter(section)
+        section_sql = f"AND {clause}"
+        params.extend(section_params)
+    rows = conn.execute(
+        sql.format(section=section_sql) + f" ORDER BY {MEMO_SORTS[sort]}", params
+    ).fetchall()
+    return [
+        {**dict(r), "active": bool(r["active"]), "question": r["question"][:120]}
+        for r in rows
+    ]
+
+
 # ---------- AI 해설 ----------
 
 def explanation_out(row: sqlite3.Row, cached: bool) -> dict:

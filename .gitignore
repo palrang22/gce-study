@@ -14,6 +14,9 @@ data/*.db-journal
 data/*.db-wal
 data/*.db-shm
 
+# ===== 기기 간 이전용 복사본 =====
+copy/
+
 # ===== 환경변수 / 인증 =====
 .env
 .env.*

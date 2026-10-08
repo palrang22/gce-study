@@ -13,6 +13,7 @@ const getExam = () => sessionStorage.getItem(EXAM_KEY) || "";
 const setExam = (exam) => sessionStorage.setItem(EXAM_KEY, exam);
 const homeKey = () => `quiz.home.${getExam()}`;          // 범위 선택 폼 값 (시험별)
 const notesKey = () => `quiz.notesFilter.${getExam()}`;  // 오답노트 필터 (시험별)
+const memosKey = () => `quiz.memosFilter.${getExam()}`;  // 메모 모아보기 필터 (시험별)
 
 // ---------- 유틸 ----------
 
@@ -133,6 +134,7 @@ function route() {
   const name = hash.startsWith("#/exam") ? "exam"
     : quiz ? "quiz"
     : hash.startsWith("#/wrong-notes") ? "wrong-notes"
+    : hash.startsWith("#/memos") ? "memos"
     : "home";
 
   if (name !== "exam" && !getExam()) {
@@ -149,6 +151,7 @@ function route() {
     name === "exam" ? renderExamPicker
     : name === "quiz" ? () => renderQuiz(quiz[1] === "notes" ? "notes" : (quiz[1] ? Number(quiz[1]) : null))
     : name === "wrong-notes" ? renderWrongNotes
+    : name === "memos" ? renderMemos
     : renderHome;
   render().catch((e) => {
     app.innerHTML = `<div class="card"><p>불러오지 못했어요: ${escapeHtml(e.message)}</p>
@@ -873,6 +876,81 @@ async function renderWrongNotes() {
   $("#retry-all").addEventListener("click", () => startLocalSession(ids, notes.map((n) => n.number), listLabel()));
   // 문제 클릭: 이 목록으로 연습을 시작하고 클릭한 문제에서 시작
   const open = (item) => startLocalSession(ids, notes.map((n) => n.number), listLabel(), Number(item.dataset.index));
+  for (const item of $$(".note-item")) {
+    item.addEventListener("click", (e) => { if (!e.target.closest("details")) open(item); });
+    item.addEventListener("keydown", (e) => { if (e.key === "Enter" && e.target === item) open(item); });
+  }
+}
+
+// ---------- 메모 모아보기 (오답노트 active 여부와 무관하게, 메모 있는 문제 전부) ----------
+
+async function renderMemos() {
+  const rid = ++renderId;
+  app.innerHTML = `<p class="muted">불러오는 중…</p>`;
+  const exam = getExam();
+  const filter = { section: "", sort: "number", ...(loadJSON(memosKey()) || {}) };
+  const [sections, memos] = await Promise.all([
+    api("/api/sections", { params: { exam } }),
+    api("/api/memos", {
+      params: {
+        exam,
+        section: filter.section ? [filter.section] : undefined,
+        sort: filter.sort,
+      },
+    }),
+  ]);
+  if (rid !== renderId) return;
+
+  const ids = memos.map((n) => n.question_id);
+  window.scrollTo(0, 0);
+  app.innerHTML = `
+    <section class="card">
+      <div class="notes-head">
+        <h1 class="grow">메모 <span class="muted small">${memos.length}문제</span></h1>
+        <button class="primary" id="retry-all" ${memos.length ? "" : "disabled"}>이 목록으로 보기</button>
+      </div>
+      <div class="notes-filters">
+        <span class="grow"></span>
+        ${sections.length > 1 ? `
+          <select id="section-filter" aria-label="섹션 필터">
+            <option value="">전체 섹션</option>
+            ${sections.map((s) => {
+              const v = s.section ?? NULL_SECTION;
+              return `<option value="${escapeHtml(v)}" ${v === filter.section ? "selected" : ""}>${escapeHtml(sectionLabel(s.section))}</option>`;
+            }).join("")}
+          </select>` : ""}
+        <select id="sort" aria-label="정렬">
+          ${[["number", "번호순"], ["recent", "최근 수정 순"]].map(([v, label]) => `
+            <option value="${v}" ${filter.sort === v ? "selected" : ""}>${label}</option>`).join("")}
+        </select>
+      </div>
+      ${memos.length ? `
+        <ul class="note-list">
+          ${memos.map((n, i) => `
+            <li class="note-item" data-index="${i}" tabindex="0">
+              <span class="note-num">Q${n.number}</span>
+              <span class="note-preview">${n.section ? `<span class="badge">${escapeHtml(n.section)}</span> ` : ""}${escapeHtml(n.question)}</span>
+              <span class="note-count">${n.active ? `<span class="badge">오답노트</span>` : ""}</span>
+              <div class="note-meta">
+                <span>수정 ${formatTime(n.updated_at)}</span>
+                <div class="note-memo">📝 ${escapeHtml(n.memo)}</div>
+              </div>
+            </li>`).join("")}
+        </ul>` : `<p class="muted">메모가 비어 있어요. 문제 풀이 화면에서 메모를 적으면 여기 모여요.</p>`}
+    </section>`;
+
+  const setFilter = (patch) => { saveJSON(memosKey(), { ...filter, ...patch }); route(); };
+  $("#section-filter")?.addEventListener("change", (e) => setFilter({ section: e.target.value }));
+  $("#sort").addEventListener("change", (e) => setFilter({ sort: e.target.value }));
+
+  const listLabel = () => {
+    const parts = ["메모"];
+    if (filter.section) parts.push(sectionLabel(filter.section === NULL_SECTION ? null : filter.section));
+    return parts.join(" · ");
+  };
+  // 메모 모아보기도 오답노트 연습과 동일하게 서버 세션 없이 브라우저에만 임시로 들고 있는다 (startLocalSession)
+  $("#retry-all").addEventListener("click", () => startLocalSession(ids, memos.map((n) => n.number), listLabel()));
+  const open = (item) => startLocalSession(ids, memos.map((n) => n.number), listLabel(), Number(item.dataset.index));
   for (const item of $$(".note-item")) {
     item.addEventListener("click", (e) => { if (!e.target.closest("details")) open(item); });
     item.addEventListener("keydown", (e) => { if (e.key === "Enter" && e.target === item) open(item); });
