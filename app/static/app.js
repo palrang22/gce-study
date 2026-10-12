@@ -58,6 +58,20 @@ function renderMarkdown(md) {
     .replaceAll(BOLD_OPEN, "<strong>")
     .replaceAll(BOLD_CLOSE, "</strong>");
 }
+// AI 해설에 $...$/$$...$$ 로 섞여 나오는 LaTeX 수식(예: \rightarrow)을 실제 기호로 렌더링.
+// pre/code 블록은 auto-render가 기본으로 건너뛰므로 gcloud 명령어의 $는 건드리지 않음.
+function renderMath(el) {
+  if (!window.renderMathInElement) return;
+  renderMathInElement(el, {
+    delimiters: [
+      { left: "$$", right: "$$", display: true },
+      { left: "$", right: "$", display: false },
+      { left: "\\(", right: "\\)", display: false },
+      { left: "\\[", right: "\\]", display: true },
+    ],
+    throwOnError: false,
+  });
+}
 
 function loadJSON(key) {
   try { return JSON.parse(sessionStorage.getItem(key)); } catch { return null; }
@@ -606,6 +620,7 @@ async function renderQuiz(sessionId) {
         </form>
         ${msgErr}
       </div>`;
+    renderMath(area);
   }
   $("#ai-area").addEventListener("click", (e) => {
     if (e.target.closest("#ai-generate")) requestAi(false);
