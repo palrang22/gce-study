@@ -50,3 +50,5 @@ def test_migration_adds_session_id_to_old_db(tmp_path):
     columns = {r["name"] for r in conn.execute("PRAGMA table_info(attempts)")}
     assert "session_id" in columns
     assert conn.execute("SELECT COUNT(*) FROM attempts").fetchone()[0] == 1
+    # ACE 단일 시험 시절 DB: exam 컬럼이 추가되고 기존 문제는 ACE 로 채워진다
+    assert conn.execute("SELECT exam FROM questions WHERE id = 1").fetchone()[0] == "ACE"

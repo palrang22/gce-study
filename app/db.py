@@ -21,7 +21,6 @@ CREATE TABLE IF NOT EXISTS questions (
     explanation TEXT NOT NULL DEFAULT '',
     images      TEXT NOT NULL DEFAULT '[]'  -- JSON ["Q42.png"]
 );
-CREATE INDEX IF NOT EXISTS idx_questions_exam ON questions(exam);
 
 -- 테스트 세션: 범위를 정해 푸는 한 회차. 이어 풀 수 있도록 위치를 저장한다.
 CREATE TABLE IF NOT EXISTS test_sessions (
@@ -34,7 +33,6 @@ CREATE TABLE IF NOT EXISTS test_sessions (
     created_at    TEXT NOT NULL DEFAULT (datetime('now', 'localtime')),
     updated_at    TEXT NOT NULL DEFAULT (datetime('now', 'localtime'))
 );
-CREATE INDEX IF NOT EXISTS idx_sessions_exam ON test_sessions(exam);
 
 -- 풀 때마다 한 줄씩 누적 (덮어쓰지 않음). 세션을 지워도 기록은 남는다 (session_id 만 NULL).
 CREATE TABLE IF NOT EXISTS attempts (
@@ -97,15 +95,16 @@ def init_db(conn: sqlite3.Connection) -> None:
         conn.execute("ALTER TABLE attempts ADD COLUMN session_id INTEGER REFERENCES test_sessions(id)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_attempts_session ON attempts(session_id)")
 
-    # 이전 버전 DB (ACE 단일 시험 시절): questions/test_sessions 에 exam 이 없으면 추가
+    # 이전 버전 DB (ACE 단일 시험 시절): questions/test_sessions 에 exam 이 없으면 추가.
+    # exam 인덱스는 컬럼이 생긴 뒤에 만든다 (SCHEMA 에 두면 예전 DB에서 "no such column: exam")
     columns = {r["name"] for r in conn.execute("PRAGMA table_info(questions)")}
     if "exam" not in columns:
         conn.execute("ALTER TABLE questions ADD COLUMN exam TEXT NOT NULL DEFAULT 'ACE'")
-        conn.execute("CREATE INDEX IF NOT EXISTS idx_questions_exam ON questions(exam)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_questions_exam ON questions(exam)")
     columns = {r["name"] for r in conn.execute("PRAGMA table_info(test_sessions)")}
     if "exam" not in columns:
         conn.execute("ALTER TABLE test_sessions ADD COLUMN exam TEXT NOT NULL DEFAULT 'ACE'")
-        conn.execute("CREATE INDEX IF NOT EXISTS idx_sessions_exam ON test_sessions(exam)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_sessions_exam ON test_sessions(exam)")
 
 
 def upsert_questions(conn: sqlite3.Connection, questions: list[dict]) -> None:

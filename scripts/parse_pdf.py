@@ -28,6 +28,8 @@ EXAMS = {
 }
 # PDF만으로 채울 수 없는 내용 (그림 옮겨 적기, 빠진 정답). 이미지 파일도 questions/ 에 있다.
 FIXES_PATH = QUESTIONS_DIR / "manual_fixes.json"
+# 문제 번호별 주제 섹션. 손으로 분류한 결과.
+CATEGORIES_PATH = QUESTIONS_DIR / "categories.json"
 
 Q_RE = re.compile(r"^Q(\d+)$")
 OPTION_RE = re.compile(r"^([A-F])\.\s*(.*)$")
@@ -243,13 +245,17 @@ def parse_exam(exam: str) -> list[dict]:
         print(f"[{exam}] 수동 보정 적용: {', '.join('Q' + n for n in fixes)}")
     attach_pics(questions, exam)
 
+    all_categories = json.loads(CATEGORIES_PATH.read_text(encoding="utf-8")) if CATEGORIES_PATH.exists() else {}
+    categories = all_categories.get(exam, {})
+
     out = []
     for q in questions:
+        category = categories.get(str(q["number"]), {})
         out.append({
             "id": cfg["offset"] + q["number"],
             "number": q["number"],
             "exam": exam,
-            "section": None,
+            "section": category.get("section"),
             "question": q["question"],
             "options": q["options"],
             "answer": q["answer"],

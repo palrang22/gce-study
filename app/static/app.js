@@ -1,4 +1,4 @@
-// GCP Quiz 프론트엔드. 해시 라우팅: #/exam (시험 선택), #/ (범위 선택), #/quiz/{세션id} (풀이), #/wrong-notes (오답노트)
+// GCP Quiz 프론트엔드. 해시 라우팅: #/exam (시험 선택), #/ (범위 선택), #/quiz/{세션id} (풀이), #/topics (주제별), #/wrong-notes (오답노트)
 // 테스트 세션(문제 순서, 위치, 제출 결과)은 서버 DB에 저장된다.
 
 const $ = (sel, el = document) => el.querySelector(sel);
@@ -147,6 +147,7 @@ function route() {
   const quiz = hash.match(/^#\/quiz(?:\/(\d+|notes))?/);
   const name = hash.startsWith("#/exam") ? "exam"
     : quiz ? "quiz"
+    : hash.startsWith("#/topics") ? "topics"
     : hash.startsWith("#/wrong-notes") ? "wrong-notes"
     : hash.startsWith("#/memos") ? "memos"
     : "home";
@@ -164,6 +165,7 @@ function route() {
   const render =
     name === "exam" ? renderExamPicker
     : name === "quiz" ? () => renderQuiz(quiz[1] === "notes" ? "notes" : (quiz[1] ? Number(quiz[1]) : null))
+    : name === "topics" ? renderTopics
     : name === "wrong-notes" ? renderWrongNotes
     : name === "memos" ? renderMemos
     : renderHome;
@@ -220,7 +222,7 @@ async function startSession(ids, label, params = {}, startIndex = 0) {
   } catch (e) { toast(e.message); }
 }
 
-// ---------- 로컬 세션 (오답노트 연습: 서버에 세션을 안 만들고 브라우저에만 보관) ----------
+// ---------- 로컬 세션 (오답노트·메모·주제별 연습: 서버에 세션을 안 만들고 브라우저에만 보관) ----------
 
 const localSessionKey = () => `quiz.localSession.${getExam()}`;
 const loadLocalSession = () => loadJSON(localSessionKey());
@@ -288,6 +290,8 @@ async function renderHome() {
         </fieldset>
         <fieldset>
           <legend>섹션</legend>
+          ${sections.length > 1 ? `
+            <label class="choice"><input type="checkbox" name="section-all"> <b>전체</b></label>` : ""}
           ${sections.map((s) => `
             <label class="choice">
               <input type="checkbox" name="section" value="${escapeHtml(sectionValue(s))}"
@@ -356,7 +360,21 @@ async function renderHome() {
       out.textContent = e.message;
     }
   }, 150);
-  form.addEventListener("input", (e) => { if (e.target.name !== "label") updatePreview(); });
+  // "전체" 체크박스: 누르면 섹션 전부 켜기/끄기, 일부만 켜져 있으면 반쯤 체크 표시
+  const allBox = form.querySelector('input[name="section-all"]');
+  const sectionBoxes = $$('input[name="section"]', form);
+  const syncAllBox = () => {
+    if (!allBox) return;
+    const on = sectionBoxes.filter((b) => b.checked).length;
+    allBox.checked = on === sectionBoxes.length;
+    allBox.indeterminate = on > 0 && on < sectionBoxes.length;
+  };
+  syncAllBox();
+  form.addEventListener("input", (e) => {
+    if (e.target === allBox) sectionBoxes.forEach((b) => { b.checked = allBox.checked; });
+    if (e.target.name === "section") syncAllBox();
+    if (e.target.name !== "label") updatePreview();
+  });
   updatePreview.flush();
 
   form.addEventListener("submit", async (e) => {
@@ -398,7 +416,7 @@ async function renderQuiz(sessionId) {
   if (isLocal) {
     session = loadLocalSession();
     if (!session) {
-      app.innerHTML = `<div class="card"><p>오답노트 연습 정보를 찾을 수 없어요.</p><a href="#/wrong-notes">오답노트로 가기</a></div>`;
+      app.innerHTML = `<div class="card"><p>연습 정보를 찾을 수 없어요.</p><a href="#/wrong-notes">오답노트로 가기</a> · <a href="#/topics">주제별로 가기</a></div>`;
       return;
     }
   } else {
@@ -819,6 +837,80 @@ function renderFinished(session) {
   $("#home").addEventListener("click", () => { location.hash = "#/"; });
 }
 
+// ---------- 주제별 ----------
+
+const topicsOpenKey = () => `quiz.topicsOpen.${getExam()}`;  // 펼쳐 둔 주제 (시험별)
+const STATUS_LABELS = { correct: "맞힘", wrong: "못 맞힘", unsolved: "안 풂" };
+
+async function renderTopics() {
+  const rid = ++renderId;
+  app.innerHTML = `<p class="muted">불러오는 중…</p>`;
+  const topics = await api("/api/topics", { params: { exam: getExam() } });
+  if (rid !== renderId) return;
+
+  const openSet = new Set(loadJSON(topicsOpenKey()) || []);
+  const key = (t) => t.section ?? NULL_SECTION;
+  const sum = (k) => topics.reduce((n, t) => n + t[k], 0);
+  const solved = sum("solved");
+  window.scrollTo(0, 0);
+  app.innerHTML = `
+    <section class="card">
+      <h1>주제별</h1>
+      <div class="stats-line">
+        푼 문제 ${solved} / ${sum("total")} · 정답률 ${formatRate(solved ? sum("correct") / solved : null)}
+        <span class="muted small">(처음에 틀려도 나중에 맞히면 정답으로 셈)</span>
+      </div>
+      <div class="status-legend small muted">
+        ${Object.entries(STATUS_LABELS).map(([s, label]) => `<span><i class="dot ${s}"></i>${label}</span>`).join("")}
+      </div>
+      <div class="topic-list">
+        ${topics.map((t, i) => {
+          const ids = (status) => t.questions.filter((q) => !status || q.status === status).length;
+          return `
+          <details class="topic" data-index="${i}" ${openSet.has(key(t)) ? "open" : ""}>
+            <summary>
+              <span class="topic-name">${escapeHtml(sectionLabel(t.section))}</span>
+              <span class="topic-stat">푼 문제 <b>${t.solved}</b> / ${t.total}</span>
+              <span class="topic-stat">정답률 <b>${formatRate(t.accuracy)}</b>${t.solved ? ` <span class="muted small">(${t.correct}/${t.solved})</span>` : ""}</span>
+              <div class="bar thin topic-bar"><span style="width:${(t.solved / t.total) * 100}%"></span></div>
+            </summary>
+            <div class="topic-body">
+              <div class="actions wrap topic-actions">
+                <button class="primary" data-start="">전체 ${t.total}문제 풀기</button>
+                <button data-start="unsolved" ${ids("unsolved") ? "" : "disabled"}>안 푼 ${ids("unsolved")}문제 풀기</button>
+                <button data-start="wrong" ${ids("wrong") ? "" : "disabled"}>못 맞힌 ${ids("wrong")}문제 풀기</button>
+              </div>
+              <div class="q-grid">
+                ${t.questions.map((q, qi) => `
+                  <button class="q-cell ${q.status}" data-qi="${qi}"
+                    title="Q${q.number} · ${STATUS_LABELS[q.status]}${q.in_wrong_notes ? " · 오답노트" : ""}">${q.number}</button>`).join("")}
+              </div>
+              <p class="muted small">번호를 누르면 이 주제 전체를 그 문제부터 풀어요. 저장된 테스트 목록에는 남지 않아요 (풀이 기록·오답노트는 남음).</p>
+            </div>
+          </details>`;
+        }).join("")}
+      </div>
+    </section>`;
+
+  for (const el of $$(".topic")) {
+    const t = topics[Number(el.dataset.index)];
+    const name = sectionLabel(t.section);
+    el.addEventListener("toggle", () => {
+      el.open ? openSet.add(key(t)) : openSet.delete(key(t));
+      saveJSON(topicsOpenKey(), [...openSet]);
+    });
+    // 주제별 연습도 오답노트처럼 서버에 세션을 만들지 않고 브라우저에만 임시로 들고 있는다 (startLocalSession)
+    el.addEventListener("click", (e) => {
+      const btn = e.target.closest("button");
+      if (!btn) return;
+      const status = btn.dataset.qi !== undefined ? "" : btn.dataset.start;
+      const qs = t.questions.filter((q) => !status || q.status === status);
+      const suffix = { "": "", unsolved: " · 안 푼 문제", wrong: " · 못 맞힌 문제" }[status];
+      startLocalSession(qs.map((q) => q.id), qs.map((q) => q.number), `주제 · ${name}${suffix}`, Number(btn.dataset.qi ?? 0));
+    });
+  }
+}
+
 // ---------- 오답노트 ----------
 
 async function renderWrongNotes() {
@@ -826,18 +918,23 @@ async function renderWrongNotes() {
   app.innerHTML = `<p class="muted">불러오는 중…</p>`;
   const exam = getExam();
   const filter = { section: "", minWrong: 0, sort: "number", ...(loadJSON(notesKey()) || {}) };
-  const [sections, notes] = await Promise.all([
+  const fetchNotes = (section) => api("/api/wrong-notes", {
+    params: { exam, section: section ? [section] : undefined, min_wrong: filter.minWrong || undefined, sort: filter.sort },
+  });
+  const [sections, notes, allNotes] = await Promise.all([
     api("/api/sections", { params: { exam } }),
-    api("/api/wrong-notes", {
-      params: {
-        exam,
-        section: filter.section ? [filter.section] : undefined,
-        min_wrong: filter.minWrong || undefined,
-        sort: filter.sort,
-      },
-    }),
+    fetchNotes(filter.section),
+    filter.section ? fetchNotes("") : null,  // 주제별 오답 수는 섹션 필터와 무관하게 센다
   ]);
   if (rid !== renderId) return;
+
+  // 주제별 오답 문제 수 (많은 순)
+  const bySection = new Map();
+  for (const n of allNotes ?? notes) {
+    const v = n.section ?? NULL_SECTION;
+    bySection.set(v, (bySection.get(v) || 0) + 1);
+  }
+  const topicCounts = [...bySection].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]));
 
   const ids = notes.map((n) => n.question_id);
   const countChips = [[0, "전체"], [1, "1회 이상"], [2, "2회 이상"], [3, "3회 이상"]];
@@ -848,6 +945,14 @@ async function renderWrongNotes() {
         <h1 class="grow">오답노트 <span class="muted small">${notes.length}문제</span></h1>
         <button class="primary" id="retry-all" ${notes.length ? "" : "disabled"}>이 목록으로 새 테스트</button>
       </div>
+      ${sections.length > 1 && topicCounts.length ? `
+        <div class="topic-summary">
+          <div class="muted small">주제별 오답 (누르면 그 주제만)</div>
+          <div class="chips" role="group" aria-label="주제별 오답">
+            ${topicCounts.map(([v, count]) => `
+              <button class="chip ${v === filter.section ? "on" : ""}" data-topic="${escapeHtml(v)}">${escapeHtml(sectionLabel(v === NULL_SECTION ? null : v))}<b>${count}</b></button>`).join("")}
+          </div>
+        </div>` : ""}
       <div class="notes-filters">
         <div class="chips" role="group" aria-label="틀린 횟수">
           ${countChips.map(([v, label]) => `
@@ -888,8 +993,12 @@ async function renderWrongNotes() {
     </section>`;
 
   const setFilter = (patch) => { saveJSON(notesKey(), { ...filter, ...patch }); route(); };
-  for (const chip of $$(".chip")) {
+  for (const chip of $$(".chip[data-min]")) {
     chip.addEventListener("click", () => setFilter({ minWrong: Number(chip.dataset.min) }));
+  }
+  for (const chip of $$(".chip[data-topic]")) {
+    const v = chip.dataset.topic;
+    chip.addEventListener("click", () => setFilter({ section: v === filter.section ? "" : v }));
   }
   $("#section-filter")?.addEventListener("change", (e) => setFilter({ section: e.target.value }));
   $("#sort").addEventListener("change", (e) => setFilter({ sort: e.target.value }));

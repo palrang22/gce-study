@@ -638,6 +638,46 @@ def get_stats(exam: str = Query(..., description="ACE | PCA"), conn: sqlite3.Con
     return {"overall": with_rate(overall), "sections": sections}
 
 
+@app.get("/api/topics")
+def list_topics(exam: str = Query(..., description="ACE | PCA"), conn: sqlite3.Connection = Depends(get_db)):
+    """주제(섹션)별 진행 현황과 문제별 상태.
+
+    정답률 = 한 번이라도 맞힌 문제 수 / 한 번이라도 푼 문제 수 (처음에 틀려도 나중에 맞히면 정답으로 친다).
+    status: correct(한 번이라도 맞힘) / wrong(풀었지만 아직 못 맞힘) / unsolved
+    """
+    rows = conn.execute(
+        """
+        SELECT q.id, q.number, q.section,
+               COUNT(a.id) AS attempts,
+               COALESCE(MAX(a.is_correct), 0) AS ever_correct,
+               COALESCE(w.active, 0) AS in_wrong_notes
+        FROM questions q
+        LEFT JOIN attempts a ON a.question_id = q.id
+        LEFT JOIN wrong_notes w ON w.question_id = q.id
+        WHERE q.exam = ?
+        GROUP BY q.id ORDER BY q.section, q.number
+        """,
+        (exam,),
+    ).fetchall()
+
+    topics: dict[str | None, dict] = {}
+    for r in rows:
+        t = topics.setdefault(r["section"], {
+            "section": r["section"], "total": 0, "solved": 0, "correct": 0, "wrong_notes": 0, "questions": [],
+        })
+        status = "correct" if r["ever_correct"] else "wrong" if r["attempts"] else "unsolved"
+        t["total"] += 1
+        t["solved"] += status != "unsolved"
+        t["correct"] += status == "correct"
+        t["wrong_notes"] += bool(r["in_wrong_notes"])
+        t["questions"].append({
+            "id": r["id"], "number": r["number"], "status": status, "in_wrong_notes": bool(r["in_wrong_notes"]),
+        })
+    for t in topics.values():
+        t["accuracy"] = round(t["correct"] / t["solved"], 3) if t["solved"] else None
+    return list(topics.values())
+
+
 # ---------- 정적 파일 ----------
 
 @app.get("/images/{name:path}")

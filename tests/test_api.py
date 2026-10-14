@@ -1,3 +1,7 @@
+# 시험별로 나뉜 API (목록, 통계, 세션)는 exam 이 필수. 가짜 문제는 기본값 ACE 로 들어간다.
+ACE = {"exam": "ACE"}
+
+
 def test_question_detail_hides_answer(client):
     q = client.get("/api/questions/2").json()
     assert "answer" not in q and "explanation" not in q
@@ -29,7 +33,7 @@ def test_wrong_answer_adds_note_and_stays(client):
     # 다시 맞혀도 자동 해제하지 않음
     assert client.post("/api/questions/1/answer", json={"selected": ["B"]}).json()["in_wrong_notes"] is True
 
-    notes = client.get("/api/wrong-notes").json()
+    notes = client.get("/api/wrong-notes", params=ACE).json()
     assert [n["question_id"] for n in notes] == [1]
     assert notes[0]["wrong_count"] == 1
 
@@ -38,26 +42,26 @@ def test_wrong_note_memo_and_toggle(client):
     # 메모만 저장하면 오답노트에는 안 들어감
     assert client.put("/api/wrong-notes/3", json={"memo": "메모"}).json()["active"] is False
     assert client.get("/api/questions/3").json()["memo"] == "메모"
-    assert client.get("/api/wrong-notes").json() == []
+    assert client.get("/api/wrong-notes", params=ACE).json() == []
 
     assert client.put("/api/wrong-notes/3", json={"active": True}).json()["memo"] == "메모"
     assert client.get("/api/questions/3").json()["in_wrong_notes"] is True
     client.put("/api/wrong-notes/3", json={"active": False})
-    assert client.get("/api/wrong-notes").json() == []
+    assert client.get("/api/wrong-notes", params=ACE).json() == []
 
 
 def test_question_range_and_modes(client):
-    assert client.get("/api/questions").json() == {"count": 3, "ids": [1, 2, 3]}
-    assert client.get("/api/questions", params={"from": 2, "to": 3}).json()["ids"] == [2, 3]
-    assert client.get("/api/questions", params={"section": "null"}).json()["count"] == 3
-    assert client.get("/api/questions", params={"section": "Networking"}).json()["count"] == 0
+    assert client.get("/api/questions", params=ACE).json() == {"count": 3, "ids": [1, 2, 3]}
+    assert client.get("/api/questions", params={**ACE, "from": 2, "to": 3}).json()["ids"] == [2, 3]
+    assert client.get("/api/questions", params={**ACE, "section": "null"}).json()["count"] == 3
+    assert client.get("/api/questions", params={**ACE, "section": "Networking"}).json()["count"] == 0
 
     client.post("/api/questions/1/answer", json={"selected": ["A"]})  # 오답
     client.post("/api/questions/2/answer", json={"selected": ["B", "E"]})  # 정답
-    assert client.get("/api/questions", params={"mode": "wrong"}).json()["ids"] == [1]
-    assert client.get("/api/questions", params={"mode": "unsolved"}).json()["ids"] == [3]
+    assert client.get("/api/questions", params={**ACE, "mode": "wrong"}).json()["ids"] == [1]
+    assert client.get("/api/questions", params={**ACE, "mode": "unsolved"}).json()["ids"] == [3]
 
-    shuffled = client.get("/api/questions", params={"shuffle": True}).json()["ids"]
+    shuffled = client.get("/api/questions", params={**ACE, "shuffle": True}).json()["ids"]
     assert sorted(shuffled) == [1, 2, 3]
 
 
@@ -81,12 +85,12 @@ def test_ai_explain_cache_and_force(client):
 def test_stats(client):
     client.post("/api/questions/1/answer", json={"selected": ["A"]})
     client.post("/api/questions/1/answer", json={"selected": ["B"]})
-    s = client.get("/api/stats").json()["overall"]
+    s = client.get("/api/stats", params=ACE).json()["overall"]
     assert s == {"total": 3, "solved": 1, "attempts": 2, "correct": 1, "accuracy": 0.5}
 
 
 def test_sections(client):
-    assert client.get("/api/sections").json() == [{"section": None, "count": 3}]
+    assert client.get("/api/sections", params=ACE).json() == [{"section": None, "count": 3}]
 
 
 def test_images_only_serves_pictures(client):
@@ -123,12 +127,12 @@ def test_wrong_notes_count_times_filter_and_sort(client):
     client.post("/api/questions/3/answer", json={"selected": ["B"]})      # 1회 오답
     client.put("/api/wrong-notes/2", json={"active": True})               # 직접 추가 (틀린 적 없음)
 
-    notes = {n["question_id"]: n for n in client.get("/api/wrong-notes").json()}
+    notes = {n["question_id"]: n for n in client.get("/api/wrong-notes", params=ACE).json()}
     assert notes[1]["wrong_count"] == 3 and len(notes[1]["wrong_times"]) == 3
     assert notes[1]["last_wrong_at"] == notes[1]["wrong_times"][0]
     assert notes[2]["wrong_count"] == 0 and notes[2]["last_wrong_at"] is None
 
-    ids = lambda **p: [n["question_id"] for n in client.get("/api/wrong-notes", params=p).json()]
+    ids = lambda **p: [n["question_id"] for n in client.get("/api/wrong-notes", params={**ACE, **p}).json()]
     assert ids(min_wrong=2) == [1]
     assert ids(min_wrong=1) == [1, 3]
     assert ids(sort="count")[0] == 1
@@ -139,7 +143,7 @@ def test_wrong_notes_count_times_filter_and_sort(client):
 
 
 def test_session_create_resume_and_results(client):
-    s = client.post("/api/sessions", json={"label": "1~3번", "question_ids": [3, 1, 2], "params": {"from": 1, "to": 3}}).json()
+    s = client.post("/api/sessions", json={**ACE, "label": "1~3번", "question_ids": [3, 1, 2], "params": {"from": 1, "to": 3}}).json()
     assert s["total"] == 3 and s["answered"] == 0 and s["current_index"] == 0
 
     client.post("/api/questions/3/answer", json={"selected": ["A"], "session_id": s["id"]})
@@ -154,13 +158,13 @@ def test_session_create_resume_and_results(client):
     assert "2" not in loaded["results"]
 
     # 매번 새로 열 수 있다: 같은 범위라도 별도 세션
-    s2 = client.post("/api/sessions", json={"label": "1~3번", "question_ids": [1, 2, 3]}).json()
+    s2 = client.post("/api/sessions", json={**ACE, "label": "1~3번", "question_ids": [1, 2, 3]}).json()
     assert s2["id"] != s["id"] and s2["answered"] == 0
-    assert [x["id"] for x in client.get("/api/sessions").json()] == [s2["id"], s["id"]]
+    assert [x["id"] for x in client.get("/api/sessions", params=ACE).json()] == [s2["id"], s["id"]]
 
 
 def test_session_delete_keeps_history(client):
-    s = client.post("/api/sessions", json={"label": "t", "question_ids": [1]}).json()
+    s = client.post("/api/sessions", json={**ACE, "label": "t", "question_ids": [1]}).json()
     client.post("/api/questions/1/answer", json={"selected": ["A"], "session_id": s["id"]})
     assert client.delete(f"/api/sessions/{s['id']}").status_code == 200
     assert client.get(f"/api/sessions/{s['id']}").status_code == 404
@@ -168,8 +172,21 @@ def test_session_delete_keeps_history(client):
 
 
 def test_session_validation(client):
-    assert client.post("/api/sessions", json={"label": "t", "question_ids": []}).status_code == 400
-    assert client.post("/api/sessions", json={"label": "t", "question_ids": [999]}).status_code == 400
+    assert client.post("/api/sessions", json={**ACE, "label": "t", "question_ids": []}).status_code == 400
+    assert client.post("/api/sessions", json={**ACE, "label": "t", "question_ids": [999]}).status_code == 400
     assert client.post("/api/questions/1/answer", json={"selected": ["A"], "session_id": 999}).status_code == 404
-    s = client.post("/api/sessions", json={"label": "t", "question_ids": [1, 2]}).json()
+    s = client.post("/api/sessions", json={**ACE, "label": "t", "question_ids": [1, 2]}).json()
     assert client.patch(f"/api/sessions/{s['id']}", json={"current_index": 99}).json()["current_index"] == 2
+
+
+def test_topics_count_later_correct_as_correct(client):
+    # Q1: 틀렸다가 나중에 맞힘 → 정답, Q2: 틀리기만 함 → 오답, Q3: 안 풂
+    client.post("/api/questions/1/answer", json={"selected": ["A"]})
+    client.post("/api/questions/1/answer", json={"selected": ["B"]})
+    client.post("/api/questions/2/answer", json={"selected": ["B"]})
+    topics = client.get("/api/topics", params=ACE).json()
+    assert len(topics) == 1
+    t = topics[0]
+    assert (t["total"], t["solved"], t["correct"], t["wrong_notes"]) == (3, 2, 1, 2)
+    assert t["accuracy"] == 0.5
+    assert [q["status"] for q in t["questions"]] == ["correct", "wrong", "unsolved"]
