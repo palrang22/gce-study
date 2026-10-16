@@ -13,6 +13,7 @@ data/*.db
 data/*.db-journal
 data/*.db-wal
 data/*.db-shm
+data/temp
 
 # ===== 기기 간 이전용 복사본 =====
 copy/
