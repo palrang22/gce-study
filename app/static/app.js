@@ -1,4 +1,4 @@
-// GCP Quiz 프론트엔드. 해시 라우팅: #/exam (시험 선택), #/ (범위 선택), #/quiz/{세션id} (풀이), #/topics (주제별), #/wrong-notes (오답노트)
+// GCP Quiz 프론트엔드. 해시 라우팅: #/exam (시험 선택), #/ (범위 선택), #/quiz/{세션id} (풀이), #/topics (주제별), #/browse/{번호} (둘러보기), #/mock (시험 보기), #/mock/{세션id} (시험 결과), #/wrong-notes (오답노트)
 // 테스트 세션(문제 순서, 위치, 제출 결과)은 서버 DB에 저장된다.
 
 const $ = (sel, el = document) => el.querySelector(sel);
@@ -14,6 +14,7 @@ const setExam = (exam) => sessionStorage.setItem(EXAM_KEY, exam);
 const homeKey = () => `quiz.home.${getExam()}`;          // 범위 선택 폼 값 (시험별)
 const notesKey = () => `quiz.notesFilter.${getExam()}`;  // 오답노트 필터 (시험별)
 const memosKey = () => `quiz.memosFilter.${getExam()}`;  // 메모 모아보기 필터 (시험별)
+const browseKey = () => `quiz.browse.${getExam()}`;      // 둘러보기에서 마지막으로 본 번호 (시험별)
 
 // ---------- 유틸 ----------
 
@@ -145,9 +146,13 @@ function route() {
   if (cleanup) { cleanup(); cleanup = null; }
   const hash = location.hash || "#/";
   const quiz = hash.match(/^#\/quiz(?:\/(\d+|notes))?/);
+  const browse = hash.match(/^#\/browse(?:\/(\d+))?/);
+  const mock = hash.match(/^#\/mock(?:\/(\d+))?/);
   const name = hash.startsWith("#/exam") ? "exam"
     : quiz ? "quiz"
     : hash.startsWith("#/topics") ? "topics"
+    : browse ? "browse"
+    : mock ? "mock"
     : hash.startsWith("#/wrong-notes") ? "wrong-notes"
     : hash.startsWith("#/memos") ? "memos"
     : "home";
@@ -166,6 +171,8 @@ function route() {
     name === "exam" ? renderExamPicker
     : name === "quiz" ? () => renderQuiz(quiz[1] === "notes" ? "notes" : (quiz[1] ? Number(quiz[1]) : null))
     : name === "topics" ? renderTopics
+    : name === "mock" ? () => (mock[1] ? renderMockResult(Number(mock[1])) : renderMock())
+    : name === "browse" ? () => renderBrowse(browse[1] ? Number(browse[1]) : loadJSON(browseKey()))
     : name === "wrong-notes" ? renderWrongNotes
     : name === "memos" ? renderMemos
     : renderHome;
@@ -230,9 +237,38 @@ const saveLocalSession = (s) => saveJSON(localSessionKey(), s);
 
 function startLocalSession(ids, numbers, label, startIndex = 0) {
   if (!ids.length) { toast("풀 문제가 없어요"); return; }
-  saveLocalSession({ label, question_ids: ids, numbers, current_index: startIndex, results: {} });
+  saveLocalSession({ label, question_ids: ids, numbers, current_index: startIndex, results: {}, seed: Date.now() });
   if (location.hash === "#/quiz/notes") route();
   else location.hash = "#/quiz/notes";
+}
+
+// ---------- 보기 순서 섞기 ----------
+// 켜면 보기를 섞고 화면의 A~D를 위치대로 다시 붙인다. 제출·채점은 원래 글자로 한다.
+// 같은 테스트 안에서는 새로고침해도 순서가 같고, 새 테스트를 만들면 순서가 바뀐다.
+
+const shuffleOptionsKey = "quiz.shuffleOptions";
+function getShuffleOptions() {
+  try { return localStorage.getItem(shuffleOptionsKey) === "1"; } catch { return false; }
+}
+function setShuffleOptions(on) {
+  try { localStorage.setItem(shuffleOptionsKey, on ? "1" : "0"); } catch {}
+}
+
+function seededShuffle(items, seedText) {
+  let h = 2166136261;  // FNV-1a 해시로 시드, mulberry32로 난수
+  for (const ch of seedText) h = Math.imul(h ^ ch.charCodeAt(0), 16777619);
+  const rand = () => {
+    h = (h + 0x6d2b79f5) | 0;
+    let t = Math.imul(h ^ (h >>> 15), 1 | h);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+  const a = [...items];
+  for (let i = a.length - 1; i > 0; i--) {
+    const j = Math.floor(rand() * (i + 1));
+    [a[i], a[j]] = [a[j], a[i]];
+  }
+  return a;
 }
 
 // ---------- 범위 선택 ----------
@@ -443,7 +479,10 @@ async function renderQuiz(sessionId) {
   const q = await api(`/api/questions/${qid}`);
   if (rid !== renderId) return;
 
-  const letters = Object.keys(q.options);
+  const shuffleOn = getShuffleOptions();
+  const sessionSeed = isLocal ? `local:${session.seed ?? session.label}` : `${session.id}:${session.created_at}`;
+  const letters = shuffleOn ? seededShuffle(Object.keys(q.options), `${sessionSeed}:${qid}`) : Object.keys(q.options);  // 화면 순서 (원래 글자)
+  const shown = (l) => String.fromCharCode(65 + letters.indexOf(l));  // 원래 글자 → 화면 글자
   const isLast = session.current_index + 1 === total;  // 오답노트 연습(local)은 마지막 문제에서 "다음" 비활성화, 결과 화면 없음
   let result = session.results[qid] || null;  // 이 테스트에서 이미 제출했으면 결과 유지
   let selected = new Set(result?.selected || []);
@@ -459,6 +498,7 @@ async function renderQuiz(sessionId) {
           <input type="number" id="jump-input" min="1" placeholder="번호로 이동" aria-label="번호로 이동">
           <button type="submit">이동</button>
         </form>
+        <label class="shuffle-toggle"><input type="checkbox" id="shuffle-options" ${shuffleOn ? "checked" : ""}> 보기 섞기</label>
         <span>${session.current_index + 1} / ${total}</span>
       </div>
       <div class="bar"><span style="width:${((session.current_index + 1) / total) * 100}%"></span></div>
@@ -483,7 +523,7 @@ async function renderQuiz(sessionId) {
           <label class="option" data-letter="${l}">
             <input type="${q.multi ? "checkbox" : "radio"}" name="opt" value="${l}">
             <span class="key">${i + 1}</span>
-            <span class="letter">${l}.</span>
+            <span class="letter">${shown(l)}.</span>
             <div class="opt-text">${renderRich(q.options[l])}</div>
           </label>`).join("")}
       </div>
@@ -589,7 +629,7 @@ async function renderQuiz(sessionId) {
     paintWrongInfo();
     $("#result").innerHTML = `
       <div class="result ${result.is_correct ? "ok" : "ng"}">
-        ${result.is_correct ? "정답이에요!" : `오답이에요. 정답: ${result.answer.join(", ")}`}
+        ${result.is_correct ? "정답이에요!" : `오답이에요. 정답: ${result.answer.map(shown).join(", ")}`}
         <span class="result-time">${formatTime(result.answered_at)}</span>
       </div>
       <details class="explanation" open>
@@ -799,6 +839,10 @@ async function renderQuiz(sessionId) {
     saveMemo.flush();
   };
 
+  $("#shuffle-options").addEventListener("change", (e) => {
+    setShuffleOptions(e.target.checked);
+    route();
+  });
   $("#submit").addEventListener("click", submit);
   paintNote();
   paintWrongInfo();
@@ -909,6 +953,472 @@ async function renderTopics() {
       startLocalSession(qs.map((q) => q.id), qs.map((q) => q.number), `주제 · ${name}${suffix}`, Number(btn.dataset.qi ?? 0));
     });
   }
+}
+
+// ---------- 둘러보기 ----------
+// 정답과 해설을 처음부터 펼쳐 놓고 번호순으로 넘겨 본다. 제출이 없어서 풀이 기록·오답노트에 안 남는다.
+
+async function renderBrowse(number) {
+  const rid = ++renderId;
+  let q;
+  try {
+    q = await api("/api/browse", { params: { exam: getExam(), number: number ?? undefined } });
+  } catch (e) {
+    if (number == null) throw e;
+    toast(`Q${number}은(는) 없어요`);
+    q = await api("/api/browse", { params: { exam: getExam() } });  // 없는 번호면 처음으로
+  }
+  if (rid !== renderId) return;
+  saveJSON(browseKey(), q.number);
+  if (location.hash !== `#/browse/${q.number}`) history.replaceState(null, "", `#/browse/${q.number}`);
+
+  const letters = Object.keys(q.options);
+  const explanation = !q.explanation ? `<span class="muted">원본 해설이 없어요.</span>`
+    : /^https?:\/\//.test(q.explanation)
+      ? `<a href="${escapeHtml(q.explanation)}" target="_blank" rel="noopener noreferrer">examtopics 토론 보기 ↗</a>`
+      : renderRich(q.explanation);
+
+  window.scrollTo(0, 0);
+  app.innerHTML = `
+    <div class="progress">
+      <div class="progress-text">
+        <span>둘러보기</span>
+        <form id="jump-form" class="jump-form">
+          <input type="number" id="jump-input" min="${q.first}" max="${q.last}" placeholder="번호로 이동" aria-label="번호로 이동">
+          <button type="submit">이동</button>
+        </form>
+        <span>Q${q.number} / ${q.last}</span>
+      </div>
+      <div class="bar"><span style="width:${(q.number / q.last) * 100}%"></span></div>
+    </div>
+    <article class="card">
+      <header class="q-head">
+        <span class="q-num">Q${q.number}</span>
+        ${q.section ? `<span class="badge">${escapeHtml(q.section)}</span>` : ""}
+        ${q.multi ? `<span class="badge multi">${q.answer.length}개 선택</span>` : ""}
+        ${q.wrong_count ? `${wrongBadge(q.wrong_count)} <span class="muted small">마지막 ${formatTime(q.last_wrong_at)}</span>` : ""}
+        ${q.in_wrong_notes ? `<span class="badge">오답노트</span>` : ""}
+      </header>
+      <div class="q-text">${renderRich(q.question)}</div>
+      ${q.images.length ? `
+        <details class="figures" open>
+          <summary>원본 그림 보기 (${q.images.length})</summary>
+          ${q.images.map((src) => `<img src="/images/${src.split("/").map(encodeURIComponent).join("/")}" alt="Q${q.number} 원본 그림" loading="lazy">`).join("")}
+        </details>` : ""}
+      <div class="options locked">
+        ${letters.map((l) => `
+          <div class="option ${q.answer.includes(l) ? "correct" : ""}">
+            <span class="letter">${l}.</span>
+            <div class="opt-text">${renderRich(q.options[l])}</div>
+          </div>`).join("")}
+      </div>
+      <div class="result ok">정답: ${q.answer.join(", ")}</div>
+      <details class="explanation" open>
+        <summary>원본 해설</summary>
+        <div>${explanation}</div>
+      </details>
+      <div class="ai-area" id="ai-area"></div>
+      <div class="memo">
+        <label for="memo">메모 <span class="memo-status" id="memo-status"></span></label>
+        <textarea id="memo" rows="3" placeholder="헷갈린 점, 확인할 내용">${escapeHtml(q.memo)}</textarea>
+      </div>
+    </article>
+    <nav class="pager">
+      <button id="prev" ${q.prev == null ? "disabled" : ""}>← 이전</button>
+      <button id="next" ${q.next == null ? "disabled" : ""}>다음 →</button>
+    </nav>
+    <p class="shortcuts">단축키: <kbd>←</kbd><kbd>→</kbd> 이전/다음</p>`;
+
+  // AI 해설: 저장본이 있으면 바로 펼침, 없으면 정답 기준으로 만들 수 있게
+  let ai = q.ai, aiLoading = false, aiError = null;
+  function paintAi() {
+    const area = $("#ai-area");
+    const err = aiError ? `<p class="ai-error">${escapeHtml(aiError)}</p>` : "";
+    if (!ai) {
+      area.innerHTML = `<button id="ai-generate" ${aiLoading ? "disabled" : ""}>${aiLoading ? "AI 해설 생성 중…" : "AI 해설"}</button>${err}`;
+      return;
+    }
+    area.innerHTML = `
+      <details class="ai-box" open>
+        <summary class="ai-head">
+          <strong>AI 해설</strong>
+          <span class="muted small">${escapeHtml(ai.model)} · ${escapeHtml(formatTime(ai.created_at))}</span>
+        </summary>
+        <div class="md">${renderMarkdown(ai.content)}</div>
+      </details>`;
+    renderMath(area);
+  }
+  $("#ai-area").addEventListener("click", async (e) => {
+    if (!e.target.closest("#ai-generate") || aiLoading) return;
+    aiLoading = true; aiError = null; paintAi();
+    try {
+      ai = await api(`/api/questions/${q.id}/ai-explain`, { method: "POST", params: { force: false }, body: { selected: q.answer } });
+    } catch (err) {
+      aiError = err.message;
+    }
+    aiLoading = false;
+    if (rid === renderId) paintAi();
+  });
+  paintAi();
+
+  // 메모: 문제 풀이 화면과 같이 입력하면 자동 저장
+  const memoEl = $("#memo");
+  let savedMemo = q.memo;
+  const saveMemo = debounce(async () => {
+    const memo = memoEl.value;
+    if (memo === savedMemo) return;
+    const status = $("#memo-status");
+    status.textContent = "저장 중…";
+    try {
+      await api(`/api/wrong-notes/${q.id}`, { method: "PUT", body: { memo } });
+      savedMemo = memo;
+      if (status.isConnected) status.textContent = "저장됨";
+    } catch (e) {
+      if (status.isConnected) status.textContent = "";
+      toast(`메모 저장 실패: ${e.message}`);
+    }
+  }, 600);
+  memoEl.addEventListener("input", () => { $("#memo-status").textContent = ""; saveMemo(); });
+  memoEl.addEventListener("blur", () => saveMemo.flush());
+
+  const go = (n) => { if (n != null) { saveMemo.flush(); renderBrowse(n); } };
+  $("#prev").addEventListener("click", () => go(q.prev));
+  $("#next").addEventListener("click", () => go(q.next));
+  $("#jump-form").addEventListener("submit", (e) => {
+    e.preventDefault();
+    const n = Number($("#jump-input").value);
+    if (n) go(n);
+  });
+  function onKey(e) {
+    if (e.metaKey || e.ctrlKey || e.altKey || e.isComposing) return;
+    if (e.target.matches?.("textarea, input, select")) return;
+    if (e.key === "ArrowRight") { e.preventDefault(); go(q.next); }
+    else if (e.key === "ArrowLeft") { e.preventDefault(); go(q.prev); }
+  }
+  document.addEventListener("keydown", onKey);
+  if (cleanup) cleanup();
+  cleanup = () => {
+    document.removeEventListener("keydown", onKey);
+    saveMemo.flush();
+  };
+}
+
+// ---------- 시험 보기 ----------
+// 무작위 50문제를 정답 없이 끝까지 풀고 한 번에 채점한다. 푸는 동안은 브라우저(localStorage)에만 보관하고,
+// 채점할 때 서버 세션을 만들어 결과를 남긴다 (저장된 테스트 목록에도 "모의시험"으로 남음).
+
+const MOCK_COUNT = 50;
+const MOCK_MINUTES = 120;   // 실제 ACE: 2시간, 50~60문제
+const MOCK_PASS = 0.7;      // 공식 합격선은 비공개. 흔히 쓰는 참고치
+const mockKey = () => `quiz.mock.${getExam()}`;
+function loadMock() {
+  try { return JSON.parse(localStorage.getItem(mockKey())); } catch { return null; }
+}
+function saveMock(m) {
+  try { localStorage.setItem(mockKey(), JSON.stringify(m)); } catch { /* 저장 불가 환경 */ }
+}
+function clearMock() {
+  try { localStorage.removeItem(mockKey()); } catch { /* 저장 불가 환경 */ }
+}
+const formatDuration = (sec) => {
+  const h = Math.floor(sec / 3600), m = Math.floor((sec % 3600) / 60), s = sec % 60;
+  return `${h ? `${h}:` : ""}${String(m).padStart(h ? 2 : 1, "0")}:${String(s).padStart(2, "0")}`;
+};
+
+async function renderMock() {
+  const mock = loadMock();
+  if (mock) return renderMockExam(mock);
+
+  const rid = ++renderId;
+  app.innerHTML = `<p class="muted">불러오는 중…</p>`;
+  const sessions = await api("/api/sessions", { params: { exam: getExam() } });
+  if (rid !== renderId) return;
+  const past = sessions.filter((s) => s.params?.mode === "mock");
+  app.innerHTML = `
+    <section class="card">
+      <h1>시험 보기</h1>
+      <p>${escapeHtml(getExam())} 전체에서 무작위 ${MOCK_COUNT}문제를 실제 시험처럼 풀어요.</p>
+      <ul class="muted small mock-rules">
+        <li>끝까지 정답과 해설을 보여주지 않고, "제출하고 채점"을 누르면 한 번에 채점해요.</li>
+        <li>제한 시간은 없고 경과 시간만 보여줘요 (실제 ACE는 ${MOCK_MINUTES / 60}시간). 합격 참고선 ${formatRate(MOCK_PASS)}.</li>
+        <li>안 푼 문제는 오답으로 세요. 채점하면 풀이 기록과 오답노트에 남아요.</li>
+        <li>푸는 중에는 이 브라우저에 저장돼서 새로고침해도 이어져요.</li>
+      </ul>
+      <div class="actions"><button class="primary" id="mock-start">시험 시작</button></div>
+    </section>
+    <section class="card">
+      <h2>지난 시험</h2>
+      ${past.length ? `<div class="mock-history">${past.map((s) => {
+        const rate = s.total ? s.correct / s.total : 0;
+        return `
+          <a class="mock-row" href="#/mock/${s.id}">
+            <span>${escapeHtml(s.label)}</span>
+            <span class="muted small">${s.params.elapsed_sec != null ? formatDuration(s.params.elapsed_sec) : ""}</span>
+            <span><b>${s.correct}</b> / ${s.total} (${formatRate(rate)})</span>
+            <span class="badge ${rate >= MOCK_PASS ? "pass" : "fail"}">${rate >= MOCK_PASS ? "합격선 이상" : "합격선 미만"}</span>
+          </a>`;
+      }).join("")}</div>` : `<p class="muted">아직 본 시험이 없어요.</p>`}
+    </section>`;
+
+  $("#mock-start").addEventListener("click", async (e) => {
+    e.target.disabled = true;
+    try {
+      const { ids } = await api("/api/questions", { params: { exam: getExam(), shuffle: true } });
+      const m = { question_ids: ids.slice(0, MOCK_COUNT), answers: {}, flags: [], index: 0, started_at: Date.now() };
+      saveMock(m);
+      renderMockExam(m);
+    } catch (err) {
+      toast(err.message);
+      e.target.disabled = false;
+    }
+  });
+}
+
+const mockQuestionCache = new Map();
+const fetchMockQuestion = (id) => {
+  if (!mockQuestionCache.has(id)) {
+    const p = api(`/api/questions/${id}`);
+    p.catch(() => mockQuestionCache.delete(id));
+    mockQuestionCache.set(id, p);
+  }
+  return mockQuestionCache.get(id);
+};
+
+async function renderMockExam(m) {
+  const rid = ++renderId;
+  const total = m.question_ids.length;
+  const qid = m.question_ids[m.index];
+  const q = await fetchMockQuestion(qid);
+  if (rid !== renderId) return;
+  if (m.question_ids[m.index + 1]) fetchMockQuestion(m.question_ids[m.index + 1]);  // 다음 문제 미리 받기
+
+  const letters = Object.keys(q.options);
+  const answeredCount = () => m.question_ids.filter((id) => m.answers[id]?.length).length;
+  let selected = new Set(m.answers[qid] || []);
+  let confirmSubmit = false, confirmQuit = false, submitting = false;
+
+  window.scrollTo(0, 0);
+  app.innerHTML = `
+    <div class="progress">
+      <div class="progress-text">
+        <span>시험 보기 · <b id="mock-answered"></b> / ${total} 답함</span>
+        <span class="mock-timer" id="mock-timer"></span>
+        <span>${m.index + 1} / ${total}</span>
+      </div>
+      <div class="bar"><span style="width:${((m.index + 1) / total) * 100}%"></span></div>
+    </div>
+    <article class="card">
+      <header class="q-head">
+        <span class="q-num">${m.index + 1}번 <span class="muted small">(Q${q.number})</span></span>
+        ${q.multi ? `<span class="badge multi">${q.answer_count}개 선택</span>` : ""}
+        <span class="spacer"></span>
+        <button class="note-toggle" id="mock-flag"></button>
+      </header>
+      <div class="q-text">${renderRich(q.question)}</div>
+      ${q.images.length ? `
+        <details class="figures" open>
+          <summary>원본 그림 보기 (${q.images.length})</summary>
+          ${q.images.map((src) => `<img src="/images/${src.split("/").map(encodeURIComponent).join("/")}" alt="Q${q.number} 원본 그림" loading="lazy">`).join("")}
+        </details>` : ""}
+      <div class="options" id="options" role="${q.multi ? "group" : "radiogroup"}">
+        ${letters.map((l, i) => `
+          <label class="option" data-letter="${l}">
+            <input type="${q.multi ? "checkbox" : "radio"}" name="opt" value="${l}">
+            <span class="key">${i + 1}</span>
+            <span class="letter">${l}.</span>
+            <div class="opt-text">${renderRich(q.options[l])}</div>
+          </label>`).join("")}
+      </div>
+      ${q.multi ? `<p class="hint">정답 ${q.answer_count}개를 모두 골라야 정답이에요 (부분점수 없음)</p>` : ""}
+    </article>
+    <nav class="pager">
+      <button id="prev" ${m.index === 0 ? "disabled" : ""}>← 이전</button>
+      <button id="next" ${m.index + 1 === total ? "disabled" : ""}>다음 →</button>
+    </nav>
+    <section class="card mock-panel">
+      <div class="q-grid" id="mock-grid"></div>
+      <p class="muted small">칸을 누르면 그 문제로 가요. 파란 칸은 답한 문제, 점은 다시 볼 문제.</p>
+      <div class="actions wrap">
+        <button id="mock-quit"></button>
+        <span class="grow"></span>
+        <button class="primary" id="mock-submit"></button>
+      </div>
+    </section>
+    <p class="shortcuts">단축키: <kbd>1</kbd>~<kbd>${letters.length}</kbd> 보기 선택 · <kbd>←</kbd><kbd>→</kbd> 이전/다음</p>`;
+
+  const optionsEl = $("#options");
+  function paint() {
+    for (const label of $$(".option", optionsEl)) {
+      const on = selected.has(label.dataset.letter);
+      label.classList.toggle("selected", on);
+      $("input", label).checked = on;
+    }
+    const flagged = m.flags.includes(qid);
+    $("#mock-flag").textContent = flagged ? "● 다시 볼 문제" : "○ 다시 볼 문제로 표시";
+    $("#mock-flag").classList.toggle("on", flagged);
+    const answered = answeredCount();
+    $("#mock-answered").textContent = answered;
+    $("#mock-grid").innerHTML = m.question_ids.map((id, i) => `
+      <button class="q-cell ${m.answers[id]?.length ? "answered" : ""} ${m.flags.includes(id) ? "flagged" : ""} ${i === m.index ? "current" : ""}"
+        data-i="${i}" aria-label="${i + 1}번${m.answers[id]?.length ? " (답함)" : ""}">${i + 1}</button>`).join("");
+    const left = total - answered;
+    $("#mock-submit").textContent = submitting ? "채점 중…"
+      : confirmSubmit && left ? `안 푼 ${left}문제가 있어요. 그래도 제출`
+      : "제출하고 채점";
+    $("#mock-submit").disabled = submitting;
+    $("#mock-quit").textContent = confirmQuit ? "정말 그만두기 (답 버림)" : "시험 그만두기";
+  }
+  function save() {
+    if (selected.size) m.answers[qid] = [...selected].sort();
+    else delete m.answers[qid];
+    saveMock(m);
+    paint();
+  }
+  optionsEl.addEventListener("change", () => {
+    selected = new Set($$("input:checked", optionsEl).map((el) => el.value));
+    save();
+  });
+  function selectByIndex(i) {
+    const l = letters[i];
+    if (!l) return;
+    if (q.multi) selected.has(l) ? selected.delete(l) : selected.add(l);
+    else selected = new Set([l]);
+    save();
+  }
+  function go(index) {
+    if (index < 0 || index >= total || index === m.index) return;
+    m.index = index;
+    saveMock(m);
+    renderMockExam(m);
+  }
+  $("#prev").addEventListener("click", () => go(m.index - 1));
+  $("#next").addEventListener("click", () => go(m.index + 1));
+  $("#mock-grid").addEventListener("click", (e) => {
+    const cell = e.target.closest("[data-i]");
+    if (cell) go(Number(cell.dataset.i));
+  });
+  $("#mock-flag").addEventListener("click", () => {
+    m.flags = m.flags.includes(qid) ? m.flags.filter((id) => id !== qid) : [...m.flags, qid];
+    saveMock(m);
+    paint();
+  });
+  $("#mock-quit").addEventListener("click", () => {
+    if (!confirmQuit) { confirmQuit = true; paint(); return; }
+    clearMock();
+    renderMock();
+  });
+  $("#mock-submit").addEventListener("click", async () => {
+    if (answeredCount() < total && !confirmSubmit) { confirmSubmit = true; paint(); return; }
+    submitting = true; paint();
+    try {
+      const elapsed = Math.round((Date.now() - m.started_at) / 1000);
+      const started = new Date(m.started_at);
+      const pad = (n) => String(n).padStart(2, "0");
+      const label = `모의시험 · ${started.getMonth() + 1}/${started.getDate()} ${pad(started.getHours())}:${pad(started.getMinutes())}`;
+      const s = await api("/api/sessions", {
+        method: "POST",
+        body: { exam: getExam(), label, question_ids: m.question_ids, params: { mode: "mock", elapsed_sec: elapsed } },
+      });
+      await api(`/api/sessions/${s.id}/grade`, { method: "POST", body: { answers: m.answers } });
+      clearMock();
+      mockQuestionCache.clear();
+      location.hash = `#/mock/${s.id}`;
+    } catch (err) {
+      toast(err.message);
+      submitting = false; paint();
+    }
+  });
+
+  const tick = () => {
+    const el = $("#mock-timer");
+    if (el) el.textContent = `경과 ${formatDuration(Math.floor((Date.now() - m.started_at) / 1000))}`;
+  };
+  tick();
+  const timer = setInterval(tick, 1000);
+  function onKey(e) {
+    if (e.metaKey || e.ctrlKey || e.altKey || e.isComposing) return;
+    if (e.target.matches?.("textarea, input[type=number], input[type=text], select")) return;
+    if (/^[1-9]$/.test(e.key)) { e.preventDefault(); selectByIndex(Number(e.key) - 1); }
+    else if (e.key === "ArrowRight") { e.preventDefault(); go(m.index + 1); }
+    else if (e.key === "ArrowLeft") { e.preventDefault(); go(m.index - 1); }
+  }
+  document.addEventListener("keydown", onKey);
+  if (cleanup) cleanup();
+  cleanup = () => { clearInterval(timer); document.removeEventListener("keydown", onKey); };
+  paint();
+}
+
+async function renderMockResult(sessionId) {
+  const rid = ++renderId;
+  app.innerHTML = `<p class="muted">불러오는 중…</p>`;
+  const s = await api(`/api/sessions/${sessionId}`);
+  if (rid !== renderId) return;
+  const status = (id) => (!s.results[id] ? "unsolved" : s.results[id].is_correct ? "correct" : "wrong");
+  const rate = s.total ? s.correct / s.total : 0;
+  const bySection = new Map();
+  s.question_ids.forEach((id, i) => {
+    const t = bySection.get(s.sections[i]) || { total: 0, correct: 0 };
+    t.total += 1;
+    if (status(id) === "correct") t.correct += 1;
+    bySection.set(s.sections[i], t);
+  });
+  const sections = [...bySection.entries()].sort((a, b) => a[1].correct / a[1].total - b[1].correct / b[1].total);
+  const wrongIds = s.question_ids.filter((id) => status(id) === "wrong");
+  const unanswered = s.question_ids.filter((id) => status(id) === "unsolved");
+
+  window.scrollTo(0, 0);
+  app.innerHTML = `
+    <section class="card">
+      <h1>시험 결과</h1>
+      <p class="muted">${escapeHtml(s.label)}${s.params.elapsed_sec != null ? ` · 걸린 시간 ${formatDuration(s.params.elapsed_sec)}` : ""}</p>
+      <div class="mock-score">
+        <span class="mock-score-num">${s.correct} / ${s.total}</span>
+        <span class="mock-score-rate">${formatRate(rate)}</span>
+        <span class="badge ${rate >= MOCK_PASS ? "pass" : "fail"}">${rate >= MOCK_PASS ? "합격선 이상" : "합격선 미만"} (참고 ${formatRate(MOCK_PASS)})</span>
+      </div>
+      <p class="muted small">맞힘 ${s.correct} · 틀림 ${wrongIds.length} · 안 풂 ${unanswered.length}</p>
+      <div class="actions wrap">
+        <button id="retry-wrong" ${wrongIds.length + unanswered.length ? "" : "disabled"}>틀린·안 푼 ${wrongIds.length + unanswered.length}문제로 새 테스트</button>
+        <span class="grow"></span>
+        <button class="primary" id="mock-new">새 시험 보기</button>
+      </div>
+    </section>
+    <section class="card">
+      <h2>주제별 (약한 순)</h2>
+      <div class="mock-sections">
+        ${sections.map(([sec, t]) => `
+          <div class="mock-section">
+            <span>${escapeHtml(sectionLabel(sec))}</span>
+            <span class="muted small">${t.correct} / ${t.total}</span>
+            <div class="bar thin"><span style="width:${(t.correct / t.total) * 100}%"></span></div>
+          </div>`).join("")}
+      </div>
+    </section>
+    <section class="card">
+      <h2>문제별</h2>
+      <div class="status-legend small muted">
+        ${Object.entries(STATUS_LABELS).map(([st, label]) => `<span><i class="dot ${st}"></i>${label}</span>`).join("")}
+      </div>
+      <div class="q-grid" id="mock-result-grid">
+        ${s.question_ids.map((id, i) => `
+          <button class="q-cell ${status(id)}" data-i="${i}" title="Q${s.numbers[i]}">${i + 1}</button>`).join("")}
+      </div>
+      <p class="muted small">칸을 누르면 정답과 해설, AI 해설을 볼 수 있어요.</p>
+    </section>`;
+
+  $("#mock-result-grid").addEventListener("click", async (e) => {
+    const cell = e.target.closest("[data-i]");
+    if (!cell) return;
+    try {
+      await api(`/api/sessions/${s.id}`, { method: "PATCH", body: { current_index: Number(cell.dataset.i) } });
+      location.hash = `#/quiz/${s.id}`;
+    } catch (err) {
+      toast(err.message);
+    }
+  });
+  $("#retry-wrong").addEventListener("click", () =>
+    startSession([...wrongIds, ...unanswered], `${s.label} · 틀린·안 푼 문제`));
+  $("#mock-new").addEventListener("click", () => { location.hash = "#/mock"; });
 }
 
 // ---------- 오답노트 ----------

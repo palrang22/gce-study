@@ -190,3 +190,27 @@ def test_topics_count_later_correct_as_correct(client):
     assert (t["total"], t["solved"], t["correct"], t["wrong_notes"]) == (3, 2, 1, 2)
     assert t["accuracy"] == 0.5
     assert [q["status"] for q in t["questions"]] == ["correct", "wrong", "unsolved"]
+
+
+def test_browse_reveals_answer_without_recording(client):
+    q = client.get("/api/browse", params={**ACE, "number": 2}).json()
+    assert q["number"] == 2 and q["answer"] and "explanation" in q
+    assert (q["prev"], q["next"], q["first"], q["last"]) == (1, 3, 1, 3)
+    assert client.get("/api/browse", params=ACE).json()["number"] == 1  # 번호 없으면 처음
+    assert client.get("/api/browse", params={**ACE, "number": 99}).status_code == 404
+    assert client.get("/api/stats", params=ACE).json()["overall"]["attempts"] == 0  # 풀이 기록 안 남음
+
+
+def test_grade_session_records_answers_at_once(client):
+    s = client.post("/api/sessions", json={**ACE, "label": "모의시험", "question_ids": [1, 2, 3], "params": {"mode": "mock"}}).json()
+    answer1 = client.get("/api/browse", params={**ACE, "number": 1}).json()["answer"]
+    wrong2 = [l for l in "ABCD" if l not in client.get("/api/browse", params={**ACE, "number": 2}).json()["answer"]][:1]
+    r = client.post(f"/api/sessions/{s['id']}/grade", json={"answers": {"1": answer1, "2": wrong2, "3": []}})
+    assert r.status_code == 200
+    g = r.json()
+    assert (g["answered"], g["correct"], g["current_index"], g["total"]) == (2, 1, 3, 3)  # 안 푼 3번은 기록 없음
+    detail = client.get(f"/api/sessions/{s['id']}").json()
+    assert set(detail["results"]) == {"1", "2"} and detail["sections"] == [None, None, None]
+    assert client.get("/api/wrong-notes", params=ACE).json()[0]["number"] == 2  # 틀리면 오답노트
+    bad = client.post(f"/api/sessions/{s['id']}/grade", json={"answers": {"999": ["A"]}})
+    assert bad.status_code == 400

@@ -163,6 +163,54 @@ def get_question(question_id: int, conn: sqlite3.Connection = Depends(get_db)):
     }
 
 
+@app.get("/api/browse")
+def browse_question(
+    exam: str = Query(..., description="ACE | PCA"),
+    number: int | None = Query(None, description="문제 번호. 없거나 범위 밖이면 가장 가까운 번호"),
+    conn: sqlite3.Connection = Depends(get_db),
+):
+    """둘러보기: 정답과 해설을 처음부터 같이 보낸다 (풀이가 아니라 훑어보기용, 기록 안 남김)."""
+    bounds = conn.execute(
+        "SELECT MIN(number) AS first, MAX(number) AS last, COUNT(*) AS total FROM questions WHERE exam = ?",
+        (exam,),
+    ).fetchone()
+    if not bounds["total"]:
+        raise HTTPException(404, f"{exam} 문제 없음")
+    if number is None:
+        number = bounds["first"]
+    row = conn.execute(
+        "SELECT * FROM questions WHERE exam = ? AND number = ?", (exam, number)
+    ).fetchone()
+    if row is None:
+        raise HTTPException(404, f"{exam} Q{number} 없음")
+    q = question_from_row(row)
+    prev_number = conn.execute(
+        "SELECT MAX(number) FROM questions WHERE exam = ? AND number < ?", (exam, number)
+    ).fetchone()[0]
+    next_number = conn.execute(
+        "SELECT MIN(number) FROM questions WHERE exam = ? AND number > ?", (exam, number)
+    ).fetchone()[0]
+    note = conn.execute(
+        "SELECT active, memo FROM wrong_notes WHERE question_id = ?", (q["id"],)
+    ).fetchone()
+    ai_row = conn.execute(
+        "SELECT * FROM ai_explanations WHERE question_id = ? ORDER BY id DESC LIMIT 1", (q["id"],)
+    ).fetchone()
+    return {
+        **{k: q[k] for k in ("id", "number", "exam", "section", "question", "options",
+                             "answer", "multi", "explanation", "images")},
+        "first": bounds["first"],
+        "last": bounds["last"],
+        "total": bounds["total"],
+        "prev": prev_number,
+        "next": next_number,
+        "in_wrong_notes": bool(note and note["active"]),
+        "memo": note["memo"] if note else "",
+        **wrong_summary(conn, q["id"]),
+        "ai": explanation_out(ai_row, cached=True) if ai_row else None,
+    }
+
+
 def wrong_summary(conn: sqlite3.Connection, question_id: int) -> dict:
     row = conn.execute(
         "SELECT COUNT(*) AS wrong_count, MAX(created_at) AS last_wrong_at "
@@ -177,6 +225,26 @@ class AnswerIn(BaseModel):
     session_id: int | None = None
 
 
+def record_attempt(
+    conn: sqlite3.Connection, question_id: int, selected: list[str], is_correct: bool, session_id: int | None
+) -> str:
+    """풀이 기록 한 줄 추가. 틀리면 오답노트 자동 추가 (다시 맞혀도 자동 해제하지 않는다). 기록 시각 반환."""
+    cur = conn.execute(
+        "INSERT INTO attempts (question_id, session_id, selected, is_correct) VALUES (?, ?, ?, ?)",
+        (question_id, session_id, json.dumps(selected), int(is_correct)),
+    )
+    if not is_correct:
+        conn.execute(
+            """
+            INSERT INTO wrong_notes (question_id, active) VALUES (?, 1)
+            ON CONFLICT(question_id) DO UPDATE SET
+                active = 1, updated_at = datetime('now', 'localtime')
+            """,
+            (question_id,),
+        )
+    return conn.execute("SELECT created_at FROM attempts WHERE id = ?", (cur.lastrowid,)).fetchone()[0]
+
+
 @app.post("/api/questions/{question_id}/answer")
 def submit_answer(question_id: int, body: AnswerIn, conn: sqlite3.Connection = Depends(get_db)):
     q = question_from_row(get_question_row(conn, question_id))
@@ -188,23 +256,7 @@ def submit_answer(question_id: int, body: AnswerIn, conn: sqlite3.Connection = D
         get_session_row(conn, body.session_id)
         touch_session(conn, body.session_id)
 
-    cur = conn.execute(
-        "INSERT INTO attempts (question_id, session_id, selected, is_correct) VALUES (?, ?, ?, ?)",
-        (question_id, body.session_id, json.dumps(selected), int(is_correct)),
-    )
-    created_at = conn.execute(
-        "SELECT created_at FROM attempts WHERE id = ?", (cur.lastrowid,)
-    ).fetchone()[0]
-    if not is_correct:
-        # 틀리면 오답노트 자동 추가. 다시 맞혀도 자동 해제하지 않는다.
-        conn.execute(
-            """
-            INSERT INTO wrong_notes (question_id, active) VALUES (?, 1)
-            ON CONFLICT(question_id) DO UPDATE SET
-                active = 1, updated_at = datetime('now', 'localtime')
-            """,
-            (question_id,),
-        )
+    created_at = record_attempt(conn, question_id, selected, is_correct, body.session_id)
     note = conn.execute(
         "SELECT active FROM wrong_notes WHERE question_id = ?", (question_id,)
     ).fetchone()
@@ -538,6 +590,31 @@ def create_session(body: SessionIn, conn: sqlite3.Connection = Depends(get_db)):
     return session_summary(conn, get_session_row(conn, cur.lastrowid))
 
 
+class GradeIn(BaseModel):
+    answers: dict[int, list[str]]  # 문제 id → 고른 보기. 안 푼 문제는 빼거나 빈 배열
+
+
+@app.post("/api/sessions/{session_id}/grade")
+def grade_session(session_id: int, body: GradeIn, conn: sqlite3.Connection = Depends(get_db)):
+    """시험 보기: 끝까지 푼 답을 한 번에 채점한다. 안 푼 문제는 기록 없이 오답으로 셈 (점수 = 정답 / 전체)."""
+    row = get_session_row(conn, session_id)
+    ids = json.loads(row["question_ids"])
+    extra = [qid for qid in body.answers if qid not in ids]
+    if extra:
+        raise HTTPException(400, f"이 세션에 없는 문제: {extra[:10]}")
+    for qid in ids:
+        if not body.answers.get(qid):
+            continue
+        q = question_from_row(get_question_row(conn, qid))
+        selected = normalize_selected(body.answers[qid], q["options"])
+        record_attempt(conn, qid, selected, set(selected) == set(q["answer"]), session_id)
+    conn.execute(
+        "UPDATE test_sessions SET current_index = ?, updated_at = datetime('now', 'localtime') WHERE id = ?",
+        (len(ids), session_id),
+    )
+    return session_summary(conn, get_session_row(conn, session_id))
+
+
 @app.get("/api/sessions")
 def list_sessions(exam: str = Query(..., description="ACE | PCA"), conn: sqlite3.Connection = Depends(get_db)):
     rows = conn.execute(
@@ -567,16 +644,17 @@ def get_session(session_id: int, conn: sqlite3.Connection = Depends(get_db)):
             "answered_at": a["created_at"],
         }
     ids = json.loads(row["question_ids"])
-    number_by_id = {
-        r["id"]: r["number"]
+    info = {
+        r["id"]: r
         for r in conn.execute(
-            f"SELECT id, number FROM questions WHERE id IN ({','.join('?' * len(ids))})", ids
+            f"SELECT id, number, section FROM questions WHERE id IN ({','.join('?' * len(ids))})", ids
         )
     }
     return {
         **session_summary(conn, row),
         "question_ids": ids,
-        "numbers": [number_by_id[i] for i in ids],  # question_ids와 같은 순서. 번호로 이동할 때 씀
+        "numbers": [info[i]["number"] for i in ids],  # question_ids와 같은 순서. 번호로 이동할 때 씀
+        "sections": [info[i]["section"] for i in ids],  # 시험 결과의 주제별 점수용
         "results": results,
     }
 
