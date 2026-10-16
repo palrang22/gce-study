@@ -1,0 +1,21 @@
+[
+  {
+    "id": 10001,
+    "number": 1,
+    "exam": "PCA",
+    "section": null,
+    "question": "A retail company wants its web application to stay available even if an entire Google Cloud zone fails. The application runs on Compute Engine. Which two actions should you take? (Choose two.)",
+    "options": {
+      "A": "Use a regional managed instance group spread across multiple zones.",
+      "B": "Use a single large VM with a local SSD.",
+      "C": "Put an external Application Load Balancer in front of the instance group.",
+      "D": "Take a daily snapshot of the VM boot disk.",
+      "E": "Use a zonal unmanaged instance group."
+    },
+    "answer": ["A", "C"],
+    "multi": true,
+    "explanation": "",
+    "images": [],
+    "parse_warnings": []
+  }
+]

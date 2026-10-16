@@ -5,8 +5,6 @@ plan.md
 questions/
 
 # ===== 데이터 (회사 자료, 개인 풀이 기록) =====
-data/raw/
-data/sample.txt
 data/questions_*.json
 data/pics/
 data/*.db
